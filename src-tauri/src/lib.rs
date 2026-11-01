@@ -86,6 +86,21 @@ pub fn run() {
             }
 
             build_tray(app)?;
+
+            // 启动后若 AI 开关已开启，自动把上次没跑完的 pending 补跑
+            if cfg.ai.enabled && settings::ai_verified(&cfg.ai) && settings::ai_configured(&cfg.ai) {
+                let pending = app
+                    .state::<commands::AppState>()
+                    .db
+                    .lock()
+                    .ok()
+                    .and_then(|db| db.pending_ids(1).ok())
+                    .map(|v| !v.is_empty())
+                    .unwrap_or(false);
+                if pending {
+                    commands::spawn_analysis(app.handle(), "pending");
+                }
+            }
             Ok(())
         })
         .on_window_event(|window, event| {

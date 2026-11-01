@@ -73,9 +73,9 @@ pub fn hide_quick(app: AppHandle) {
 // ---------- 设置 ----------
 
 #[tauri::command]
-pub fn get_settings(app: AppHandle) -> settings::Settings {
+pub fn get_settings(app: AppHandle) -> settings::SettingsView {
     let st = app.state::<AppState>();
-    settings::load(&st.data_dir)
+    settings::SettingsView::of(settings::load(&st.data_dir))
 }
 
 #[tauri::command]
@@ -133,7 +133,7 @@ pub async fn scan_now(app: AppHandle) -> Result<ScanResult, String> {
     })
     .await
     .map_err(|e| e.to_string())?;
-    spawn_analysis(&app);
+    spawn_analysis(&app, "pending");
     result
 }
 
@@ -186,29 +186,88 @@ fn do_scan(st: &AppState) -> Result<ScanResult, String> {
 }
 
 /// 后台逐个分析 pending 项目；AI 未配置时静默跳过（项目靠 FTS 兜底可用）。
-pub fn spawn_analysis(app: &AppHandle) {
+/// 后台并发分析项目。
+/// mode: "pending" 只分析未分析的；"all" 全部重新分析（覆盖已有结论）。
+pub fn spawn_analysis(app: &AppHandle, mode: &str) {
     let handle = app.clone();
+    let mode = mode.to_string();
     std::thread::spawn(move || {
         let st = handle.state::<AppState>();
-        if st.analyzing.load(Ordering::SeqCst) {
-            return;
-        }
         let cfg = settings::load(&st.data_dir);
-        if !settings::ai_configured(&cfg.ai) {
+        if !cfg.ai.enabled {
+            eprintln!("[analysis] AI 分析开关已关闭，跳过");
             return;
         }
-        st.analyzing.store(true, Ordering::SeqCst);
-        loop {
-            let next = match st.db.lock() {
-                Ok(db) => db.pending_ids(1).unwrap_or_default(),
-                Err(_) => break,
-            };
-            let Some(id) = next.into_iter().next() else {
-                break;
-            };
-            let _ = analyze_one(&handle, id, &cfg);
+        if !settings::ai_configured(&cfg.ai) {
+            eprintln!("[analysis] AI 未配置，跳过");
+            return;
+        }
+        // compare_exchange 防止两个线程同时开跑
+        if st
+            .analyzing
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_err()
+        {
+            eprintln!("[analysis] 已有分析线程在跑，跳过");
+            return;
+        }
+
+        let ids: Vec<i64> = {
+            match st.db.lock() {
+                Ok(db) => {
+                    if mode == "all" {
+                        // 全部重新分析：先把已完成的清成 pending，再统一取
+                        let _ = db.reset_all_for_reanalysis();
+                    }
+                    match db.pending_ids(10000) {
+                        Ok(v) => v,
+                        Err(e) => {
+                            eprintln!("[analysis] 查询待分析失败: {e}");
+                            Vec::new()
+                        }
+                    }
+                }
+                Err(_) => Vec::new(),
+            }
+        };
+
+        if ids.is_empty() {
+            eprintln!("[analysis] 没有待分析项目");
+            st.analyzing.store(false, Ordering::SeqCst);
+            return;
+        }
+        eprintln!(
+            "[analysis] 模式={mode} 共 {} 个项目，并发={}",
+            ids.len(),
+            cfg.ai.concurrency
+        );
+
+        let concurrency = cfg.ai.concurrency.clamp(1, settings::MAX_CONCURRENCY) as usize;
+        let queue = std::sync::Arc::new(std::sync::Mutex::new(ids));
+        let mut workers = Vec::new();
+        for _ in 0..concurrency {
+            let queue = queue.clone();
+            let handle = handle.clone();
+            let cfg = cfg.clone();
+            workers.push(std::thread::spawn(move || loop {
+                let id = match queue.lock() {
+                    Ok(mut q) => match q.pop() {
+                        Some(id) => id,
+                        None => break,
+                    },
+                    Err(_) => break,
+                };
+                match analyze_one(&handle, id, &cfg) {
+                    Ok(()) => eprintln!("[analysis] #{id} 完成"),
+                    Err(e) => eprintln!("[analysis] #{id} 失败: {e}"),
+                }
+            }));
+        }
+        for w in workers {
+            let _ = w.join();
         }
         st.analyzing.store(false, Ordering::SeqCst);
+        eprintln!("[analysis] 全部结束");
     });
 }
 
@@ -254,8 +313,12 @@ fn analyze_one(app: &AppHandle, id: i64, cfg: &settings::Settings) -> Result<(),
 }
 
 #[tauri::command]
-pub fn analyze_pending(app: AppHandle) -> Result<(), String> {
-    spawn_analysis(&app);
+pub fn analyze_pending(app: AppHandle, mode: Option<String>) -> Result<(), String> {
+    let cfg = settings::load(&app.state::<AppState>().data_dir);
+    if !cfg.ai.enabled {
+        return Err("AI 分析已关闭，请到设置里开启".into());
+    }
+    spawn_analysis(&app, mode.as_deref().unwrap_or("pending"));
     Ok(())
 }
 
@@ -279,12 +342,15 @@ pub async fn test_ai(app: AppHandle) -> Result<String, String> {
     let handle = app.clone();
     tauri::async_runtime::spawn_blocking(move || {
         let st = handle.state::<AppState>();
-        let cfg = settings::load(&st.data_dir);
+        let mut cfg = settings::load(&st.data_dir);
         if !settings::ai_configured(&cfg.ai) {
             return Err("请先填写 API 地址和 Key".into());
         }
         let provider = analyzer::from_config(&cfg.ai);
         let a = provider.analyze("ping", "未知", &signals::Signals::empty())?;
+        // 测试通过：记录本次配置指纹，允许开启开关
+        cfg.ai.verified_fingerprint = settings::ai_fingerprint(&cfg.ai);
+        settings::save(&st.data_dir, &cfg)?;
         Ok(format!("连接成功，模型返回：{}", a.description))
     })
     .await
@@ -356,7 +422,7 @@ pub fn confirm_candidate(app: AppHandle, id: i64) -> Result<(), String> {
             .map_err(|_| "数据库被占用")?
             .set_status(id, "pending")?;
     }
-    spawn_analysis(&app);
+    spawn_analysis(&app, "pending");
     Ok(())
 }
 
@@ -405,7 +471,7 @@ pub fn add_manual_project(app: AppHandle, path: String) -> Result<db::ProjectRow
         db.get(id)?.ok_or_else(|| "读取失败".to_string())?
     };
     if row.status == "pending" {
-        spawn_analysis(&app);
+        spawn_analysis(&app, "pending");
     }
     Ok(row)
 }

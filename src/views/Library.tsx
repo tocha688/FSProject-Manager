@@ -3,7 +3,61 @@ import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import * as api from "../lib/api";
 import type { AppStatus, OpenTarget, Project } from "../lib/types";
 import { relativeTime, statusLabel, truncatePath } from "../lib/format";
+import { countPending } from "../lib/project";
 import Settings from "./Settings";
+
+function AnalyzeMenu(props: {
+  disabled: boolean;
+  pendingCount: number;
+  onPick: (mode: "pending" | "all") => void;
+}) {
+  const { disabled, pendingCount, onPick } = props;
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const onDocClick = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+    };
+    document.addEventListener("mousedown", onDocClick);
+    return () => document.removeEventListener("mousedown", onDocClick);
+  }, [open]);
+
+  const pick = (mode: "pending" | "all") => {
+    setOpen(false);
+    onPick(mode);
+  };
+
+  return (
+    <div className="menu-wrap" ref={ref}>
+      <button
+        onClick={() => setOpen((o) => !o)}
+        disabled={disabled}
+        title="AI 分析"
+        className="split-btn"
+      >
+        AI 分析
+        {pendingCount > 0 && <span className="count-dot">{pendingCount}</span>}
+        <span className="caret">▾</span>
+      </button>
+      {open && (
+        <div className="menu" role="menu">
+          <button role="menuitem" onClick={() => pick("pending")}>
+            <span className="mi-title">分析未分析项目</span>
+            <span className="mi-sub">
+              {pendingCount > 0 ? `共 ${pendingCount} 个待分析` : "没有待分析项目"}
+            </span>
+          </button>
+          <button role="menuitem" onClick={() => pick("all")}>
+            <span className="mi-title">全部重新分析</span>
+            <span className="mi-sub">覆盖已有说明与标签（保留备注）</span>
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
 
 export default function Library() {
   const [projects, setProjects] = useState<Project[]>([]);
@@ -86,13 +140,25 @@ export default function Library() {
     try {
       notify("扫描中…");
       const r = await api.scanNow();
-      void api.analyzePending();
+      void api.analyzePending("pending");
       notify(`扫描完成：发现 ${r.found} 个，清理失效 ${r.pruned} 个，库中共 ${r.total} 个`);
       refresh(queryRef.current);
     } catch (e) {
       notify(String(e));
     }
   }, [notify, refresh]);
+
+  const doAnalyze = useCallback(
+    async (mode: "pending" | "all") => {
+      try {
+        await api.analyzePending(mode);
+        notify(mode === "all" ? "已开始全部重新分析…" : "已开始分析未分析项目…");
+      } catch (e) {
+        notify(String(e));
+      }
+    },
+    [notify],
+  );
 
   const addManual = useCallback(async () => {
     const path = await openDialog({ directory: true, multiple: false });
@@ -111,6 +177,7 @@ export default function Library() {
   }
 
   const busy = status.scanning || status.analyzing;
+  const pendingCount = countPending(projects);
 
   return (
     <div className="app">
@@ -130,6 +197,7 @@ export default function Library() {
           <button onClick={doScan} disabled={status.scanning}>
             扫描
           </button>
+          <AnalyzeMenu disabled={status.analyzing} onPick={doAnalyze} pendingCount={pendingCount} />
           <button onClick={addManual}>手动添加</button>
           <button onClick={() => setShowSettings(true)}>设置</button>
         </div>

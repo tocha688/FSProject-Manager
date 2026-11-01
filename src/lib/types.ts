@@ -8,6 +8,9 @@ export interface AiConfig {
   baseUrl: string;
   apiKey: string;
   model: string;
+  enabled: boolean;
+  concurrency: number;
+  verifiedFingerprint: string;
 }
 
 export interface Settings {
@@ -16,6 +19,11 @@ export interface Settings {
   shortcut: string;
   editorCmd: string;
   autostart: boolean;
+}
+
+/** get_settings 的返回：附带后端权威判定的"是否已验证" */
+export interface SettingsView extends Settings {
+  aiVerified: boolean;
 }
 
 export interface Project {

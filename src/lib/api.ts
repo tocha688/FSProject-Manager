@@ -6,9 +6,10 @@ import type {
   Project,
   ScanResult,
   Settings,
+  SettingsView,
 } from "./types";
 
-export const getSettings = () => invoke<Settings>("get_settings");
+export const getSettings = () => invoke<SettingsView>("get_settings");
 export const saveSettings = (s: Settings) => invoke<void>("save_settings", { s });
 export const scanNow = () => invoke<ScanResult>("scan_now");
 export const listProjects = () => invoke<Project[]>("list_projects");
@@ -27,7 +28,8 @@ export const confirmCandidate = (id: number) =>
   invoke<void>("confirm_candidate", { id });
 export const deleteProject = (id: number) => invoke<void>("delete_project", { id });
 export const analyzeProject = (id: number) => invoke<void>("analyze_project", { id });
-export const analyzePending = () => invoke<void>("analyze_pending");
+export const analyzePending = (mode: "pending" | "all" = "pending") =>
+  invoke<void>("analyze_pending", { mode });
 export const testAi = () => invoke<string>("test_ai");
 export const getStatus = () => invoke<AppStatus>("get_status");
 export const getDataInfo = () => invoke<DataInfo>("data_info");

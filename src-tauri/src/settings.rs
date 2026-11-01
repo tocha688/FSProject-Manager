@@ -32,7 +32,34 @@ pub struct AiConfig {
     pub base_url: String,
     pub api_key: String,
     pub model: String,
+    /// 总开关：关闭后扫描不自动分析，手动分析也会被拒绝。
+    pub enabled: bool,
+    /// 并发分析数（同时进行的 AI 请求数）。
+    pub concurrency: u32,
+    /// 最近一次连接测试通过时的配置指纹；配置变更后即失效。
+    #[serde(default)]
+    pub verified_fingerprint: String,
 }
+
+/// 参与"已验证"判定的配置指纹：地址/模型/key/provider 任一变化都需重测。
+pub fn ai_fingerprint(ai: &AiConfig) -> String {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut h = DefaultHasher::new();
+    ai.provider.hash(&mut h);
+    ai.base_url.trim().hash(&mut h);
+    ai.model.trim().hash(&mut h);
+    ai.api_key.trim().hash(&mut h);
+    format!("{:016x}", h.finish())
+}
+
+/// 当前配置是否已通过连接测试。
+pub fn ai_verified(ai: &AiConfig) -> bool {
+    !ai.verified_fingerprint.is_empty() && ai.verified_fingerprint == ai_fingerprint(ai)
+}
+
+pub const DEFAULT_CONCURRENCY: u32 = 2;
+pub const MAX_CONCURRENCY: u32 = 8;
 
 impl Default for RootConfig {
     fn default() -> Self {
@@ -50,6 +77,9 @@ impl Default for AiConfig {
             base_url: DEFAULT_BASE_URL.into(),
             api_key: String::new(),
             model: DEFAULT_MODEL.into(),
+            enabled: false,
+            concurrency: DEFAULT_CONCURRENCY,
+            verified_fingerprint: String::new(),
         }
     }
 }
@@ -62,6 +92,25 @@ impl Default for Settings {
             shortcut: DEFAULT_SHORTCUT.into(),
             editor_cmd: DEFAULT_EDITOR_CMD.into(),
             autostart: false,
+        }
+    }
+}
+
+/// 返回给前端的设置视图：附带"是否已验证"的权威判定，避免前端重复实现指纹逻辑。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SettingsView {
+    #[serde(flatten)]
+    pub settings: Settings,
+    pub ai_verified: bool,
+}
+
+impl SettingsView {
+    pub fn of(s: Settings) -> Self {
+        let ai_verified = ai_verified(&s.ai);
+        SettingsView {
+            settings: s,
+            ai_verified,
         }
     }
 }
@@ -111,6 +160,11 @@ pub fn normalize(s: &mut Settings) {
     s.ai.model = s.ai.model.trim().to_string();
     if s.ai.model.is_empty() {
         s.ai.model = DEFAULT_MODEL.into();
+    }
+    s.ai.concurrency = s.ai.concurrency.clamp(1, MAX_CONCURRENCY);
+    // 配置不完整或未通过连接测试时不允许开启
+    if s.ai.enabled && (!ai_configured(&s.ai) || !ai_verified(&s.ai)) {
+        s.ai.enabled = false;
     }
 }
 
@@ -248,5 +302,89 @@ mod tests {
         let d = data_dir();
         std::env::remove_var("PF_DATA_DIR");
         assert_eq!(d, tmp.path());
+    }
+
+    #[test]
+    fn concurrency_is_clamped() {
+        let mut s = Settings::default();
+        s.ai.concurrency = 0;
+        normalize(&mut s);
+        assert_eq!(s.ai.concurrency, 1);
+        s.ai.concurrency = 999;
+        normalize(&mut s);
+        assert_eq!(s.ai.concurrency, MAX_CONCURRENCY);
+        s.ai.concurrency = 4;
+        normalize(&mut s);
+        assert_eq!(s.ai.concurrency, 4);
+    }
+
+    #[test]
+    fn default_ai_is_disabled() {
+        assert!(!AiConfig::default().enabled);
+        assert_eq!(AiConfig::default().concurrency, DEFAULT_CONCURRENCY);
+    }
+
+    #[test]
+    fn enabling_requires_verified_fingerprint() {
+        let mut s = Settings::default();
+        s.ai.api_key = "sk-x".into();
+        s.ai.enabled = true;
+        normalize(&mut s);
+        // 未测试过 → 不允许开启
+        assert!(!s.ai.enabled);
+    }
+
+    #[test]
+    fn enabling_works_after_verification() {
+        let mut s = Settings::default();
+        s.ai.api_key = "sk-x".into();
+        s.ai.verified_fingerprint = ai_fingerprint(&s.ai);
+        assert!(ai_verified(&s.ai));
+        s.ai.enabled = true;
+        normalize(&mut s);
+        assert!(s.ai.enabled);
+    }
+
+    #[test]
+    fn fingerprint_changes_when_config_changes() {
+        let mut ai = AiConfig::default();
+        ai.api_key = "k1".into();
+        let f1 = ai_fingerprint(&ai);
+        ai.api_key = "k2".into();
+        assert_ne!(f1, ai_fingerprint(&ai));
+
+        let mut ai2 = AiConfig::default();
+        ai2.api_key = "k1".into();
+        let f2 = ai_fingerprint(&ai2);
+        ai2.model = "other-model".into();
+        assert_ne!(f2, ai_fingerprint(&ai2));
+
+        let mut ai3 = AiConfig::default();
+        ai3.api_key = "k1".into();
+        let f3 = ai_fingerprint(&ai3);
+        ai3.base_url = "https://other/v1".into();
+        assert_ne!(f3, ai_fingerprint(&ai3));
+    }
+
+    #[test]
+    fn changing_config_invalidates_verification() {
+        let mut ai = AiConfig::default();
+        ai.api_key = "k1".into();
+        ai.verified_fingerprint = ai_fingerprint(&ai);
+        assert!(ai_verified(&ai));
+        // 改 key 后，之前的验证失效，开关必须被关掉
+        ai.api_key = "k2".into();
+        assert!(!ai_verified(&ai));
+        let mut s = Settings::default();
+        s.ai = ai;
+        s.ai.enabled = true;
+        normalize(&mut s);
+        assert!(!s.ai.enabled);
+    }
+
+    #[test]
+    fn empty_fingerprint_is_not_verified() {
+        let ai = AiConfig::default();
+        assert!(!ai_verified(&ai));
     }
 }

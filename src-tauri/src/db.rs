@@ -254,6 +254,19 @@ impl Db {
         Ok(ids)
     }
 
+    /// 全部重新分析：把所有非候选项目重置为 pending（保留用户备注与手动标签）。
+    /// 候选项目（candidate）保持不动，避免误分析未确认的目录。
+    pub fn reset_all_for_reanalysis(&self) -> Result<usize, String> {
+        let n = self
+            .conn
+            .execute(
+                "UPDATE projects SET status='pending', updated_at=?1 WHERE status!='candidate'",
+                params![now()],
+            )
+            .map_err(|e| e.to_string())?;
+        Ok(n)
+    }
+
     /// 清理磁盘上已不存在的项目，返回删除数量。
     pub fn prune_missing(&self) -> Result<usize, String> {
         let mut stmt = self
@@ -419,5 +432,51 @@ mod tests {
         let db = Db::open_in_memory().unwrap();
         assert!(db.get(999).unwrap().is_none());
         assert!(db.get_id_by_path(r"C:\nope").unwrap().is_none());
+    }
+
+    #[test]
+    fn reset_all_for_reanalysis_moves_done_back_to_pending() {
+        let db = Db::open_in_memory().unwrap();
+        db.upsert(&sample(r"C:\a", "pending")).unwrap();
+        db.upsert(&sample(r"C:\b", "pending")).unwrap();
+        let id_a = db.get_id_by_path(r"C:\a").unwrap().unwrap();
+        let id_b = db.get_id_by_path(r"C:\b").unwrap().unwrap();
+        db.set_analysis(id_a, "已完成", &["t".into()], "x").unwrap();
+        db.set_status(id_b, "failed").unwrap();
+
+        let n = db.reset_all_for_reanalysis().unwrap();
+        assert_eq!(n, 2);
+        assert_eq!(db.get(id_a).unwrap().unwrap().status, "pending");
+        assert_eq!(db.get(id_b).unwrap().unwrap().status, "pending");
+        // 已有结论保留，供重新分析失败时兜底
+        assert_eq!(
+            db.get(id_a).unwrap().unwrap().description.as_deref(),
+            Some("已完成")
+        );
+    }
+
+    #[test]
+    fn reset_all_keeps_candidates_untouched() {
+        let db = Db::open_in_memory().unwrap();
+        db.upsert(&sample(r"C:\c", "candidate")).unwrap();
+        db.upsert(&sample(r"C:\d", "pending")).unwrap();
+        let n = db.reset_all_for_reanalysis().unwrap();
+        assert_eq!(n, 1); // 只重置了 pending 那条
+        let id_c = db.get_id_by_path(r"C:\c").unwrap().unwrap();
+        assert_eq!(db.get(id_c).unwrap().unwrap().status, "candidate");
+        assert!(db.pending_ids(10).unwrap().len() == 1);
+    }
+
+    #[test]
+    fn reset_all_preserves_user_notes_and_tags() {
+        let db = Db::open_in_memory().unwrap();
+        db.upsert(&sample(r"C:\e", "pending")).unwrap();
+        let id = db.get_id_by_path(r"C:\e").unwrap().unwrap();
+        db.update_notes(id, Some("我的备注")).unwrap();
+        db.update_tags(id, &["手动标签".into()]).unwrap();
+        db.reset_all_for_reanalysis().unwrap();
+        let row = db.get(id).unwrap().unwrap();
+        assert_eq!(row.notes.as_deref(), Some("我的备注"));
+        assert_eq!(row.tags, vec!["手动标签"]);
     }
 }
