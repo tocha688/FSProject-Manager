@@ -117,6 +117,8 @@ pub fn run() {
             commands::save_settings,
             commands::scan_now,
             commands::list_projects,
+            commands::project_facets,
+            commands::classify_untyped,
             commands::search_projects,
             commands::update_notes,
             commands::update_tags,

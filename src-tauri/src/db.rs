@@ -2,7 +2,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
-const COLS: &str = "id,path,name,language,status,description,tags,notes,deps,commits,readme,git_remote,structure,last_commit_at,analyzed_at,ai_source,updated_at";
+const COLS: &str = "id,path,name,language,status,description,tags,notes,deps,commits,readme,git_remote,structure,last_commit_at,analyzed_at,ai_source,updated_at,project_type";
 
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS projects (
@@ -22,7 +22,8 @@ CREATE TABLE IF NOT EXISTS projects (
     last_commit_at INTEGER,
     analyzed_at INTEGER,
     ai_source TEXT,
-    updated_at INTEGER NOT NULL DEFAULT 0
+    updated_at INTEGER NOT NULL DEFAULT 0,
+    project_type TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_projects_status ON projects(status);
 ";
@@ -51,6 +52,8 @@ pub struct ProjectRow {
     pub analyzed_at: Option<i64>,
     pub ai_source: Option<String>,
     pub updated_at: i64,
+    /// AI 判定的项目类型（固定枚举，见 analyzer::PROJECT_TYPES）；空串表示未分类。
+    pub project_type: String,
 }
 
 /// 扫描/手动添加时的新项目输入。
@@ -83,6 +86,29 @@ fn json_vec(s: &str) -> Vec<String> {
     serde_json::from_str(s).unwrap_or_default()
 }
 
+/// 老库升级：补齐后加的列（SQLite 的 CREATE TABLE IF NOT EXISTS 不会改已存在的表）。
+/// 注意：依赖新列的索引必须放在这里建，不能写进 SCHEMA——
+/// 老库执行 SCHEMA 时列还不存在，会直接报 "no such column" 导致应用打不开库。
+fn migrate(conn: &Connection) -> Result<(), String> {
+    let cols: Vec<String> = conn
+        .prepare("PRAGMA table_info(projects)")
+        .map_err(|e| e.to_string())?
+        .query_map([], |r| r.get::<_, String>("name"))
+        .map_err(|e| e.to_string())?
+        .collect::<Result<_, _>>()
+        .map_err(|e| e.to_string())?;
+    if !cols.iter().any(|c| c == "project_type") {
+        conn.execute_batch("ALTER TABLE projects ADD COLUMN project_type TEXT NOT NULL DEFAULT ''")
+            .map_err(|e| e.to_string())?;
+    }
+    conn.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_projects_type ON projects(project_type);
+         CREATE INDEX IF NOT EXISTS idx_projects_language ON projects(language);",
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 fn row_to_project(row: &rusqlite::Row) -> rusqlite::Result<ProjectRow> {
     Ok(ProjectRow {
         id: row.get("id")?,
@@ -102,6 +128,7 @@ fn row_to_project(row: &rusqlite::Row) -> rusqlite::Result<ProjectRow> {
         analyzed_at: row.get("analyzed_at")?,
         ai_source: row.get("ai_source")?,
         updated_at: row.get("updated_at")?,
+        project_type: row.get::<_, Option<String>>("project_type")?.unwrap_or_default(),
     })
 }
 
@@ -112,6 +139,7 @@ impl Db {
         }
         let conn = Connection::open(path).map_err(|e| e.to_string())?;
         conn.execute_batch(SCHEMA).map_err(|e| e.to_string())?;
+        migrate(&conn)?;
         Ok(Db { conn })
     }
 
@@ -119,6 +147,7 @@ impl Db {
     pub fn open_in_memory() -> Result<Self, String> {
         let conn = Connection::open_in_memory().map_err(|e| e.to_string())?;
         conn.execute_batch(SCHEMA).map_err(|e| e.to_string())?;
+        migrate(&conn)?;
         Ok(Db { conn })
     }
 
@@ -191,15 +220,88 @@ impl Db {
             .map_err(|e| e.to_string())
     }
 
-    /// 写入 AI 分析结果，状态置为 ok。
-    pub fn set_analysis(&self, id: i64, description: &str, tags: &[String], source: &str) -> Result<(), String> {
+    /// 写入 AI 分析结果（含项目类型），状态置为 ok。
+    pub fn set_analysis_typed(
+        &self,
+        id: i64,
+        description: &str,
+        tags: &[String],
+        project_type: &str,
+        source: &str,
+    ) -> Result<(), String> {
         self.conn
             .execute(
-                "UPDATE projects SET description=?1, tags=?2, ai_source=?3, status='ok', analyzed_at=?4, updated_at=?4 WHERE id=?5",
-                params![description, to_json(tags), source, now(), id],
+                "UPDATE projects SET description=?1, tags=?2, project_type=?3, ai_source=?4,
+                 status='ok', analyzed_at=?5, updated_at=?5 WHERE id=?6",
+                params![description, to_json(tags), project_type, source, now(), id],
             )
             .map_err(|e| e.to_string())?;
         Ok(())
+    }
+
+    /// 已有 AI 说明但类型为空的项目（用于补分类），返回 (id, description, tags)。
+    pub fn untyped_analyzed(&self, limit: u32) -> Result<Vec<(i64, String, Vec<String>)>, String> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT id, COALESCE(description,''), tags FROM projects
+                 WHERE status='ok' AND COALESCE(project_type,'')='' ORDER BY id LIMIT ?1",
+            )
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map(params![limit], |r| {
+                let tags: String = r.get(2)?;
+                Ok((r.get(0)?, r.get(1)?, json_vec(&tags)))
+            })
+            .map_err(|e| e.to_string())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())?;
+        Ok(rows)
+    }
+
+    /// 设置项目类型（用于补分类）。
+    pub fn set_project_type(&self, id: i64, project_type: &str) -> Result<(), String> {
+        self.conn
+            .execute(
+                "UPDATE projects SET project_type=?1, updated_at=?2 WHERE id=?3",
+                params![project_type, now(), id],
+            )
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    /// 语言与类型的分布统计，供筛选器展示可用选项与数量。
+    pub fn facets(&self) -> Result<(Vec<(String, usize)>, Vec<(String, usize)>), String> {
+        let mut langs: std::collections::BTreeMap<String, usize> = Default::default();
+        let mut stmt = self
+            .conn
+            .prepare("SELECT language, COUNT(*) FROM projects GROUP BY language")
+            .map_err(|e| e.to_string())?;
+        for row in stmt
+            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)? as usize)))
+            .map_err(|e| e.to_string())?
+        {
+            let (k, v) = row.map_err(|e| e.to_string())?;
+            if !k.is_empty() {
+                langs.insert(k, v);
+            }
+        }
+        let mut types: std::collections::BTreeMap<String, usize> = Default::default();
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT project_type, COUNT(*) FROM projects
+                 WHERE COALESCE(project_type,'')<>'' GROUP BY project_type",
+            )
+            .map_err(|e| e.to_string())?;
+        for row in stmt
+            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)? as usize)))
+            .map_err(|e| e.to_string())?
+        {
+            let (k, v) = row.map_err(|e| e.to_string())?;
+            types.insert(k, v);
+        }
+        Ok((langs.into_iter().collect(), types.into_iter().collect()))
     }
 
     pub fn set_status(&self, id: i64, status: &str) -> Result<(), String> {
@@ -334,7 +436,7 @@ mod tests {
         let db = Db::open_in_memory().unwrap();
         db.upsert(&sample(r"C:\a", "pending")).unwrap();
         let id = db.get_id_by_path(r"C:\a").unwrap().unwrap();
-        db.set_analysis(id, "一个演示项目", &["演示".into()], "openai-compatible")
+        db.set_analysis_typed(id, "一个演示项目", &["演示".into()], "Web 应用", "openai-compatible")
             .unwrap();
         db.update_notes(id, Some("我自己的备注")).unwrap();
 
@@ -363,7 +465,7 @@ mod tests {
         let db = Db::open_in_memory().unwrap();
         db.upsert(&sample(r"C:\a", "pending")).unwrap();
         let id = db.get_id_by_path(r"C:\a").unwrap().unwrap();
-        db.set_analysis(id, "d", &[], "x").unwrap();
+        db.set_analysis_typed(id, "d", &[], "命令行工具", "x").unwrap();
         db.upsert(&sample(r"C:\a", "candidate")).unwrap();
         assert_eq!(db.list().unwrap()[0].status, "ok");
     }
@@ -441,7 +543,7 @@ mod tests {
         db.upsert(&sample(r"C:\b", "pending")).unwrap();
         let id_a = db.get_id_by_path(r"C:\a").unwrap().unwrap();
         let id_b = db.get_id_by_path(r"C:\b").unwrap().unwrap();
-        db.set_analysis(id_a, "已完成", &["t".into()], "x").unwrap();
+        db.set_analysis_typed(id_a, "已完成", &["t".into()], "库/框架", "x").unwrap();
         db.set_status(id_b, "failed").unwrap();
 
         let n = db.reset_all_for_reanalysis().unwrap();
@@ -478,5 +580,138 @@ mod tests {
         let row = db.get(id).unwrap().unwrap();
         assert_eq!(row.notes.as_deref(), Some("我的备注"));
         assert_eq!(row.tags, vec!["手动标签"]);
+    }
+}
+
+#[cfg(test)]
+mod filter_tests {
+    use super::*;
+
+    fn proj(path: &str, lang: &str) -> NewProject {
+        NewProject {
+            path: path.into(),
+            name: path.into(),
+            language: lang.into(),
+            status: "pending".into(),
+            deps: vec![],
+            commits: vec![],
+            readme: None,
+            git_remote: None,
+            structure: vec![],
+            last_commit_at: None,
+        }
+    }
+
+    #[test]
+    fn project_type_roundtrip() {
+        let db = Db::open_in_memory().unwrap();
+        db.upsert(&proj(r"C:\a", "Rust")).unwrap();
+        let id = db.get_id_by_path(r"C:\a").unwrap().unwrap();
+        assert_eq!(db.get(id).unwrap().unwrap().project_type, "");
+
+        db.set_analysis_typed(id, "工具", &["cli".into()], "命令行工具", "ai")
+            .unwrap();
+        let row = db.get(id).unwrap().unwrap();
+        assert_eq!(row.project_type, "命令行工具");
+        assert_eq!(row.status, "ok");
+    }
+
+    #[test]
+    fn facets_count_languages_and_types() {
+        let db = Db::open_in_memory().unwrap();
+        db.upsert(&proj(r"C:\a", "Rust")).unwrap();
+        db.upsert(&proj(r"C:\b", "Rust")).unwrap();
+        db.upsert(&proj(r"C:\c", "Node.js")).unwrap();
+        let ida = db.get_id_by_path(r"C:\a").unwrap().unwrap();
+        let idb = db.get_id_by_path(r"C:\b").unwrap().unwrap();
+        db.set_analysis_typed(ida, "d", &[], "命令行工具", "x").unwrap();
+        db.set_analysis_typed(idb, "d", &[], "Web 应用", "x").unwrap();
+
+        let (langs, types) = db.facets().unwrap();
+        assert_eq!(
+            langs,
+            vec![("Node.js".to_string(), 1), ("Rust".to_string(), 2)]
+        );
+        assert_eq!(
+            types,
+            vec![("Web 应用".to_string(), 1), ("命令行工具".to_string(), 1)]
+        );
+    }
+
+    #[test]
+    fn facets_exclude_empty_values() {
+        let db = Db::open_in_memory().unwrap();
+        db.upsert(&proj(r"C:\a", "")).unwrap();
+        let (langs, types) = db.facets().unwrap();
+        assert!(langs.is_empty());
+        assert!(types.is_empty());
+    }
+
+    #[test]
+    fn untyped_analyzed_lists_only_done_without_type() {
+        let db = Db::open_in_memory().unwrap();
+        db.upsert(&proj(r"C:\done-notype", "Rust")).unwrap();
+        db.upsert(&proj(r"C:\done-typed", "Rust")).unwrap();
+        db.upsert(&proj(r"C:\pending", "Rust")).unwrap();
+
+        let a = db.get_id_by_path(r"C:\done-notype").unwrap().unwrap();
+        let b = db.get_id_by_path(r"C:\done-typed").unwrap().unwrap();
+        db.set_analysis_typed(a, "有说明无类型", &["t".into()], "", "x")
+            .unwrap();
+        db.set_analysis_typed(b, "有说明有类型", &[], "库/框架", "x")
+            .unwrap();
+
+        let rows = db.untyped_analyzed(100).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].0, a);
+        assert_eq!(rows[0].1, "有说明无类型");
+        assert_eq!(rows[0].2, vec!["t"]);
+    }
+
+    #[test]
+    fn set_project_type_updates_existing_row() {
+        let db = Db::open_in_memory().unwrap();
+        db.upsert(&proj(r"C:\a", "Python")).unwrap();
+        let id = db.get_id_by_path(r"C:\a").unwrap().unwrap();
+        db.set_project_type(id, "爬虫/数据采集").unwrap();
+        assert_eq!(
+            db.get(id).unwrap().unwrap().project_type,
+            "爬虫/数据采集"
+        );
+    }
+
+    #[test]
+    fn migration_adds_project_type_to_legacy_table() {
+        // 模拟老库：建一个没有 project_type 列的表，再跑 open 的迁移路径
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("legacy.db");
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE projects (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    path TEXT NOT NULL UNIQUE,
+                    name TEXT NOT NULL,
+                    language TEXT NOT NULL DEFAULT '',
+                    status TEXT NOT NULL DEFAULT 'pending',
+                    description TEXT, tags TEXT NOT NULL DEFAULT '[]', notes TEXT,
+                    deps TEXT NOT NULL DEFAULT '[]', commits TEXT NOT NULL DEFAULT '[]',
+                    readme TEXT, git_remote TEXT, structure TEXT NOT NULL DEFAULT '[]',
+                    last_commit_at INTEGER, analyzed_at INTEGER, ai_source TEXT,
+                    updated_at INTEGER NOT NULL DEFAULT 0);
+                 INSERT INTO projects(path,name,language,status)
+                    VALUES('C:/old','old','Rust','pending');",
+            )
+            .unwrap();
+        }
+        // open() 会建表 + migrate，应补上 project_type 且不丢老数据
+        let db = Db::open(&path).unwrap();
+        let rows = db.list().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].name, "old");
+        assert_eq!(rows[0].project_type, "");
+        // 并且新列可用
+        db.set_project_type(rows[0].id, "库/框架").unwrap();
+        assert_eq!(db.get(rows[0].id).unwrap().unwrap().project_type, "库/框架");
     }
 }

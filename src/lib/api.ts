@@ -13,6 +13,7 @@ export const getSettings = () => invoke<SettingsView>("get_settings");
 export const saveSettings = (s: Settings) => invoke<void>("save_settings", { s });
 export const scanNow = () => invoke<ScanResult>("scan_now");
 export const listProjects = () => invoke<Project[]>("list_projects");
+export const classifyUntyped = () => invoke<void>("classify_untyped");
 export const searchProjects = (query: string) =>
   invoke<Project[]>("search_projects", { query });
 export const updateNotes = (id: number, notes: string) =>

@@ -4,6 +4,14 @@ import * as api from "../lib/api";
 import type { AppStatus, OpenTarget, Project } from "../lib/types";
 import { relativeTime, statusLabel, truncatePath } from "../lib/format";
 import { countPending } from "../lib/project";
+import {
+  applyFilter,
+  buildFacets,
+  EMPTY_FILTER,
+  hasFilter,
+  UNTYPED,
+  type FilterState,
+} from "../lib/filter";
 import Settings from "./Settings";
 
 function AnalyzeMenu(props: {
@@ -65,6 +73,7 @@ export default function Library() {
   const [selected, setSelected] = useState<Project | null>(null);
   const [showSettings, setShowSettings] = useState(false);
   const [status, setStatus] = useState<AppStatus>({ scanning: false, analyzing: false });
+  const [filter, setFilter] = useState<FilterState>(EMPTY_FILTER);
   const [toast, setToast] = useState("");
   const queryRef = useRef(query);
   queryRef.current = query;
@@ -135,7 +144,6 @@ export default function Library() {
     },
     [notify],
   );
-
   const doScan = useCallback(async () => {
     try {
       notify("扫描中…");
@@ -178,6 +186,10 @@ export default function Library() {
 
   const busy = status.scanning || status.analyzing;
   const pendingCount = countPending(projects);
+  // 筛选器选项从「当前搜索结果」统计，保证下拉里的数字和实际可见结果对得上
+  const facets = buildFacets(projects);
+  const visible = applyFilter(projects, filter);
+  const filtering = hasFilter(filter);
 
   return (
     <div className="app">
@@ -192,7 +204,13 @@ export default function Library() {
         <div className="actions">
           {busy && <span className="spinner" title="处理中" />}
           <span className="hint">
-            {status.scanning ? "扫描中…" : status.analyzing ? "AI 分析中…" : `${projects.length} 个项目`}
+            {status.scanning
+              ? "扫描中…（其它操作仍可正常使用）"
+              : status.analyzing
+                ? "AI 分析中…"
+                : filtering
+                  ? `${visible.length} / ${projects.length} 个项目`
+                  : `${projects.length} 个项目`}
           </span>
           <button onClick={doScan} disabled={status.scanning}>
             扫描
@@ -203,11 +221,72 @@ export default function Library() {
         </div>
       </header>
 
+      <div className="filterbar">
+        <span className="fl-label">筛选</span>
+        <select
+          className="fl-select"
+          value={filter.language}
+          onChange={(e) => setFilter({ ...filter, language: e.target.value })}
+          title="按编程语言筛选"
+        >
+          <option value="">全部语言</option>
+          {facets.languages.map((l) => (
+            <option key={l.name} value={l.name}>
+              {l.name}（{l.count}）
+            </option>
+          ))}
+        </select>
+        <select
+          className="fl-select"
+          value={filter.type}
+          onChange={(e) => setFilter({ ...filter, type: e.target.value })}
+          title="按项目类型筛选"
+        >
+          <option value="">全部类型</option>
+          {facets.types.map((t) => (
+            <option key={t.name} value={t.name}>
+              {t.name}（{t.count}）
+            </option>
+          ))}
+          {facets.untyped > 0 && (
+            <option value={UNTYPED}>未分类（{facets.untyped}）</option>
+          )}
+        </select>
+        <select
+          className="fl-select"
+          value={filter.status}
+          onChange={(e) => setFilter({ ...filter, status: e.target.value })}
+          title="按分析状态筛选"
+        >
+          <option value="">全部状态</option>
+          <option value="ok">已分析</option>
+          <option value="pending">待分析</option>
+          <option value="failed">分析失败</option>
+          <option value="candidate">待确认</option>
+        </select>
+        {filtering && (
+          <>
+            <span className="fl-count">{visible.length} 个结果</span>
+            <button className="fl-clear" onClick={() => setFilter(EMPTY_FILTER)}>
+              清除筛选
+            </button>
+          </>
+        )}
+      </div>
+
       <div className="body">
         <main className="grid">
-          {projects.length === 0 && (
+          {visible.length === 0 && (
             <div className="empty">
-              {query.trim() ? (
+              {filtering && projects.length > 0 ? (
+                <>
+                  没有符合筛选条件的项目。
+                  <br />
+                  <button className="fl-clear inline" onClick={() => setFilter(EMPTY_FILTER)}>
+                    清除筛选
+                  </button>
+                </>
+              ) : query.trim() ? (
                 <>
                   没有匹配「{query}」的项目。
                   <br />
@@ -224,7 +303,7 @@ export default function Library() {
               )}
             </div>
           )}
-          {projects.map((p) => (
+          {visible.map((p) => (
             <div
               key={p.id}
               className={`card ${selected?.id === p.id ? "sel" : ""}`}
@@ -233,6 +312,7 @@ export default function Library() {
               <div className="card-top">
                 <span className="name">{p.name}</span>
                 <span className="badge lang">{p.language}</span>
+                {p.projectType && <span className="badge type">{p.projectType}</span>}
                 <span className={`badge st-${p.status}`}>{statusLabel(p.status)}</span>
               </div>
               <div className="desc">
@@ -347,6 +427,7 @@ function Detail(props: {
       </div>
       <div className="badges">
         <span className="badge lang">{p.language}</span>
+        {p.projectType && <span className="badge type">{p.projectType}</span>}
         <span className={`badge st-${p.status}`}>{statusLabel(p.status)}</span>
         <span className="dim">{relativeTime(p.lastCommitAt)}</span>
       </div>

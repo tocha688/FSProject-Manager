@@ -140,6 +140,50 @@ header h1 {
   min-height: 0;
 }
 
+/* 筛选栏 */
+.filterbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 16px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg);
+  flex-wrap: wrap;
+}
+
+.fl-label {
+  font-size: 12px;
+  color: var(--dim);
+}
+
+.fl-select {
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  padding: 5px 10px;
+  font-size: 12px;
+  max-width: 220px;
+  cursor: pointer;
+}
+
+.fl-select:hover {
+  border-color: var(--accent);
+}
+
+.fl-count {
+  font-size: 12px;
+  color: var(--accent);
+}
+
+.fl-clear {
+  font-size: 12px;
+  padding: 4px 10px;
+}
+
+.fl-clear.inline {
+  margin-top: 10px;
+}
+
 .grid {
   flex: 1;
   display: grid;
@@ -205,6 +249,11 @@ header h1 {
 .badge.lang {
   color: var(--accent);
   border-color: color-mix(in srgb, var(--accent) 50%, transparent);
+}
+
+.badge.type {
+  color: var(--accent2);
+  border-color: color-mix(in srgb, var(--accent2) 50%, transparent);
 }
 
 .badge.st-ok {

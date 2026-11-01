@@ -19,6 +19,7 @@ const mk = (status: string) => ({
   analyzedAt: null,
   aiSource: null,
   updatedAt: 0,
+  projectType: "",
 });
 
 describe("countPending", () => {

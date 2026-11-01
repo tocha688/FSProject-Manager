@@ -243,6 +243,7 @@ mod tests {
             analyzed_at: None,
             ai_source: None,
             updated_at: 1,
+            project_type: "Web 应用".into(),
         };
         let d = SearchDoc::from_row(&row);
         assert_eq!(d.id, 7);

@@ -44,6 +44,8 @@ export interface Project {
   analyzedAt: number | null;
   aiSource: string | null;
   updatedAt: number;
+  /** AI 判定的项目类型（固定枚举）；空串表示未分类。 */
+  projectType: string;
 }
 
 export interface AppStatus {
