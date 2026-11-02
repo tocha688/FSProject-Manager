@@ -59,8 +59,30 @@ node e2e/run.mjs    # 34 项检查，截图输出到运行目录
 ## 构建安装包
 
 ```bash
-npm run tauri build   # 产出 NSIS 安装包（src-tauri/target/release/bundle/）
+npm run tauri build   # 产出 NSIS 安装包（src-tauri/target/release/bundle/nsis/）
 ```
+
+## 发布新版本
+
+仓库带了一个 GitHub Actions 工作流（`.github/workflows/release.yml`）：
+推送 `v*` 标签即自动跑测试 → 构建 → 发布 Release。
+
+```bash
+# 1. 同步改两处版本号
+#    package.json 和 src-tauri/tauri.conf.json 的 version
+# 2. 提交后打标签推送
+git commit -am "chore: 发布 v0.2.0"
+git tag v0.2.0
+git push origin main --tags
+```
+
+工作流会：
+1. 跑前端单测、TypeScript 检查、Rust 单测——**任何一项失败都不会发布**
+2. 校验 tag 与两处配置里的版本号一致，不一致直接报错
+3. 在 `windows-latest` 上构建 NSIS 安装包
+4. 创建 Release 并把 `.exe` 挂上去（自动生成 release notes）
+
+也可以在 Actions 页面手动触发（`workflow_dispatch`），只产出构建产物不创建 Release。
 
 ## 使用
 
