@@ -23,9 +23,21 @@
 
 ```bash
 npm install
-npm test          # 前端单测（vitest）
-npm run tauri dev # 开发运行
+npm test              # 前端单测（vitest）
+
+npm run dev:tauri     # 开发运行（随机端口，推荐）
+npm run tauri dev     # 开发运行（固定端口 1420）
 ```
+
+**关于端口**：`npm run dev:tauri` 会挑一个空闲的随机端口（15000–29999），
+同时通过 `PF_DEV_PORT` 喂给 vite、用 `--config` 临时覆盖 Tauri 的 `devUrl`，
+两边永远一致，彻底避免和多项目/残留进程抢 1420。想指定端口：
+
+```bash
+npm run dev:tauri -- 15123
+```
+
+`npm run tauri dev` 仍走默认 1420——如果同时开发多个 Tauri 项目，用前者。
 
 Rust 单测：
 
