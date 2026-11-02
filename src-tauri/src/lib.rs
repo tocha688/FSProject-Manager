@@ -4,6 +4,7 @@ mod analyzer;
 mod commands;
 mod db;
 mod detect;
+mod editors;
 mod scan;
 mod search;
 mod security;
@@ -153,6 +154,7 @@ pub fn run() {
             commands::unlock,
             commands::set_password,
             commands::purge_project,
+            commands::list_editors,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

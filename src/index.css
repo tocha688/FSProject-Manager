@@ -824,3 +824,54 @@ label.check {
 .ctxitem.danger:hover:not(:disabled) {
   background: color-mix(in srgb, var(--err) 16%, transparent);
 }
+
+/* 二级子菜单 */
+.ctxsub-wrap {
+  position: relative;
+}
+
+.ctxsub-trigger {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.ctxsub-trigger.active {
+  background: var(--bg2);
+}
+
+.ctx-arrow {
+  opacity: 0.55;
+  font-size: 14px;
+  line-height: 1;
+}
+
+.ctxsubmenu {
+  position: absolute;
+  left: calc(100% + 3px);
+  top: -5px;
+  min-width: 170px;
+}
+
+.ctxitem {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.ctx-hint {
+  font-size: 11px;
+  color: var(--dim);
+  font-family: Consolas, monospace;
+  opacity: 0.8;
+}
+
+.ctx-empty {
+  padding: 8px 12px;
+  font-size: 12px;
+  color: var(--dim);
+  max-width: 220px;
+  line-height: 1.5;
+}

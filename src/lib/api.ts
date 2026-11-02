@@ -2,7 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import type {
   AppStatus,
   DataInfo,
-  OpenTarget,
+
   Project,
   ScanResult,
   Settings,
@@ -20,8 +20,17 @@ export const updateNotes = (id: number, notes: string) =>
   invoke<void>("update_notes", { id, notes });
 export const updateTags = (id: number, tags: string[]) =>
   invoke<void>("update_tags", { id, tags });
-export const openProject = (id: number, target: OpenTarget) =>
+export const openProject = (id: number, target: string) =>
   invoke<void>("open_project", { id, target });
+
+export interface EditorInfo {
+  id: string;
+  label: string;
+  command: string;
+}
+
+/** 本机实际可用的编辑器 / AI 智能体（后端做 PATH 检测）。 */
+export const listEditors = () => invoke<EditorInfo[]>("list_editors");
 export const copyPath = (id: number) => invoke<void>("copy_path", { id });
 export const addManualProject = (path: string) =>
   invoke<Project>("add_manual_project", { path });

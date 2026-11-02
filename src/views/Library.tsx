@@ -7,6 +7,7 @@ import { countPending } from "../lib/project";
 import LockScreen from "./LockScreen";
 import ContextMenu from "./ContextMenu";
 import type { MenuItem } from "./ContextMenu";
+import type { EditorInfo } from "../lib/api";
 import {
   applyFilter,
   buildFacets,
@@ -77,8 +78,14 @@ export default function Library() {
   const [showSettings, setShowSettings] = useState(false);
   const [status, setStatus] = useState<AppStatus>({ scanning: false, analyzing: false });
   const [filter, setFilter] = useState<FilterState>(EMPTY_FILTER);
+  // 本机可用的编辑器 / AI 智能体（进入页面时检测一次）
+  const [editorsList, setEditorsList] = useState<EditorInfo[]>([]);
   // 锁屏
   const [locked, setLocked] = useState<boolean | null>(null); // null = 未知（加载中）
+
+  useEffect(() => {
+    api.listEditors().then(setEditorsList).catch(() => setEditorsList([]));
+  }, []);
   // 右键菜单
   const [ctx, setCtx] = useState<{ x: number; y: number; project: Project } | null>(null);
   const [toast, setToast] = useState("");
@@ -252,10 +259,17 @@ export default function Library() {
   // 构建某项目的右键菜单项
   const menuItemsFor = useCallback(
     (p: Project): MenuItem[] => [
-      { label: "打开文件夹", onClick: () => act(p.id, "folder") },
+      {
+        label: "打开",
+        submenu: editorsList.map((e) => ({
+          label: e.label,
+          hint: e.command,
+          onClick: () => act(p.id, e.id as OpenTarget),
+        })),
+        submenuEmptyHint: "未检测到任何编辑器（需命令在 PATH 中）",
+      },
       { label: "在终端中打开", onClick: () => act(p.id, "terminal") },
-      { label: "用 VS Code 打开", onClick: () => act(p.id, "vscode") },
-      { label: "用 Trae 打开", onClick: () => act(p.id, "trae") },
+      { label: "打开所在文件夹", onClick: () => act(p.id, "folder") },
       { label: "复制路径", onClick: () => copy(p.id) },
       {
         label: "删除项目（含文件夹）",
@@ -263,7 +277,7 @@ export default function Library() {
         onClick: () => void purge(p),
       },
     ],
-    [act, copy, purge],
+    [act, copy, purge, editorsList],
   );
 
   if (showSettings) {

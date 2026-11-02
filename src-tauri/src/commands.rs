@@ -5,7 +5,7 @@ use std::sync::Mutex;
 use tauri::{AppHandle, Manager};
 
 use crate::analyzer::Provider;
-use crate::{actions, analyzer, auth, db, detect, scan, search, security, settings, signals};
+use crate::{actions, analyzer, auth, db, detect, editors, scan, search, security, settings, signals};
 use tauri_plugin_autostart::ManagerExt as _;
 
 pub struct AppState {
@@ -861,6 +861,50 @@ pub async fn add_manual_project(
 
 // ---------- 打开动作 ----------
 
+/// 列出本机实际可用的编辑器 / AI 智能体（供右键子菜单动态渲染）。
+/// 结果在进程内缓存：命令是否存在不会运行时变化，避免每次右键都跑一遍 `where`。
+#[tauri::command]
+pub async fn list_editors() -> Result<Vec<editors::EditorInfo>, String> {
+    use std::collections::HashMap;
+    use std::sync::OnceLock;
+    static CACHE: OnceLock<Mutex<HashMap<String, bool>>> = OnceLock::new();
+
+    tauri::async_runtime::spawn_blocking(move || {
+        let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+        let mut available = Vec::new();
+        for def in editors::EDITORS {
+            let mut found: Option<String> = None;
+            for cmd in def.commands {
+                let cached = cache.lock().ok().and_then(|g| g.get(*cmd).copied());
+                let hit = match cached {
+                    Some(v) => v,
+                    None => {
+                        let v = actions::command_available(cmd);
+                        if let Ok(mut g) = cache.lock() {
+                            g.insert((*cmd).to_string(), v);
+                        }
+                        v
+                    }
+                };
+                if hit {
+                    found = Some((*cmd).to_string());
+                    break;
+                }
+            }
+            if let Some(command) = found {
+                available.push(editors::EditorInfo {
+                    id: def.id.to_string(),
+                    label: def.label.to_string(),
+                    command,
+                });
+            }
+        }
+        Ok(available)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 #[tauri::command]
 pub async fn open_project(app: AppHandle, id: i64, target: String) -> Result<(), String> {
     // spawn_blocking：查库 + 启动外部进程都不该占用主线程，
@@ -880,6 +924,7 @@ pub async fn open_project(app: AppHandle, id: i64, target: String) -> Result<(),
 
 fn open_path(path: &str, target: &str, cfg: &settings::Settings) -> Result<(), String> {
     match target {
+        // 设置里配置的默认编辑器（保留原有行为）
         "editor" => {
             let program = cfg.editor_cmd.split_whitespace().next().unwrap_or("code");
             if !actions::command_available(program) {
@@ -890,23 +935,6 @@ fn open_path(path: &str, target: &str, cfg: &settings::Settings) -> Result<(), S
             actions::editor_command(path, &cfg.editor_cmd)
                 .spawn()
                 .map_err(|e| format!("启动编辑器失败（检查设置中的编辑器命令）: {e}"))?;
-        }
-        // 右键菜单里的固定编辑器目标（不受设置影响）
-        "vscode" => {
-            if !actions::command_available("code") {
-                return Err("找不到 VS Code 命令 code：请确认已加入 PATH".into());
-            }
-            actions::editor_command(path, "code")
-                .spawn()
-                .map_err(|e| format!("启动 VS Code 失败: {e}"))?;
-        }
-        "trae" => {
-            if !actions::command_available("trae") {
-                return Err("找不到 Trae 命令 trae：请确认已加入 PATH 或在设置里配置".into());
-            }
-            actions::editor_command(path, "trae")
-                .spawn()
-                .map_err(|e| format!("启动 Trae 失败: {e}"))?;
         }
         "folder" => {
             actions::folder_command(path)
@@ -919,7 +947,22 @@ fn open_path(path: &str, target: &str, cfg: &settings::Settings) -> Result<(), S
                 .spawn()
                 .map_err(|e| format!("打开终端失败: {e}"))?;
         }
-        _ => return Err("未知动作".into()),
+        // 其余目标是注册表里的编辑器/智能体（vscode、trae、opencode、zcode、dsh…）
+        other => {
+            let def = editors::find_editor(other)
+                .ok_or_else(|| format!("未知的打开方式: {other}"))?;
+            let command = editors::resolve_command(def, actions::command_available)
+                .ok_or_else(|| {
+                    format!(
+                        "未检测到 {}（尝试过命令: {}）",
+                        def.label,
+                        def.commands.join(", ")
+                    )
+                })?;
+            actions::editor_command(path, &command)
+                .spawn()
+                .map_err(|e| format!("启动 {} 失败: {e}", def.label))?;
+        }
     }
     Ok(())
 }
@@ -1023,6 +1066,21 @@ mod tests {
     fn open_path_rejects_unknown_target() {
         let cfg = settings::Settings::default();
         assert!(open_path(r"C:\x", "nonsense", &cfg).is_err());
+    }
+
+    #[test]
+    fn open_path_routes_registered_editors() {
+        let cfg = settings::Settings::default();
+        // 注册表里的工具若本机不存在，应报"未检测到"而不是"未知的打开方式"
+        for id in ["vscode", "trae", "opencode", "zcode", "dsh"] {
+            match open_path(r"C:\x", id, &cfg) {
+                Ok(()) => { /* 本机确实装了并且启动成功 */ }
+                Err(e) => assert!(
+                    !e.contains("未知的打开方式"),
+                    "{id} 应该被注册表识别，实际报错: {e}"
+                ),
+            }
+        }
     }
 
     #[test]
