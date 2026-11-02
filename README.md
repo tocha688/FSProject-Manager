@@ -56,10 +56,34 @@ PF_DATA_DIR=<测试数据目录> WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--remote-
 node e2e/run.mjs    # 34 项检查，截图输出到运行目录
 ```
 
+## 平台支持
+
+| 平台 | 安装包 | 便携版 |
+|---|---|---|
+| Windows 10/11 x64 | `.exe`（NSIS 安装程序） | `_portable.zip`（解压即用） |
+| Linux x64 | `.deb` / `.AppImage` | `_portable.tar.gz`（含 AppImage + 启动脚本） |
+| macOS 10.15+ | `.dmg` | `_portable.tar.gz`（含 .app） |
+
+**便携版**不需要安装，解压到任意目录即可运行；配置和数据库文件生成在程序所在目录，
+整个文件夹拷走就等于迁移全部数据。
+
+Linux 上如果终端打不开，需要装一个受支持的终端模拟器（gnome-terminal / konsole /
+xfce4-terminal / alacritty / kitty / xterm 任一）；剪贴板需要 `wl-clipboard`（Wayland）
+或 `xclip` / `xsel`（X11）。
+
 ## 构建安装包
 
 ```bash
-npm run tauri build   # 产出 NSIS 安装包（src-tauri/target/release/bundle/nsis/）
+npm run tauri build     # 平台安装包（Windows: NSIS，macOS: app+dmg，Linux: deb+AppImage）
+npm run portable        # 额外生成便携版（在 tauri build 之后执行）
+npm run release:build   # 上面两步合一
+```
+
+Linux 构建需要系统依赖：
+
+```bash
+sudo apt install libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev \
+                 patchelf build-essential libssl-dev libgtk-3-dev
 ```
 
 ## 发布新版本
@@ -79,8 +103,9 @@ git push origin main --tags
 工作流会：
 1. 跑前端单测、TypeScript 检查、Rust 单测——**任何一项失败都不会发布**
 2. 校验 tag 与两处配置里的版本号一致，不一致直接报错
-3. 在 `windows-latest` 上构建 NSIS 安装包
-4. 创建 Release 并把 `.exe` 挂上去（自动生成 release notes）
+3. 在 **Windows / Linux / macOS 三平台并行构建**（任一平台失败则整体不发布）
+4. 每个平台产出安装包 + 便携版
+5. 汇总所有产物，创建 Release 并挂上附件（自动生成 release notes）
 
 也可以在 Actions 页面手动触发（`workflow_dispatch`），只产出构建产物不创建 Release。
 

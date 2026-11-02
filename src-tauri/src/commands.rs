@@ -901,6 +901,31 @@ pub async fn open_project(app: AppHandle, id: i64, target: String) -> Result<(),
     .map_err(|e| e.to_string())?
 }
 
+fn open_terminal(path: &str) -> Result<(), String> {
+    let kind = actions::detect_terminal(actions::wt_available());
+
+    // Linux 上终端模拟器不统一：按候选列表逐个尝试，用第一个能启动的
+    if cfg!(all(unix, not(target_os = "macos"))) {
+        for program in actions::linux_terminal_candidates() {
+            if !actions::command_available(program) {
+                continue;
+            }
+            let spec = actions::linux_terminal_spec(program, path);
+            let mut cmd = std::process::Command::new(&spec.program);
+            cmd.args(&spec.args);
+            if cmd.spawn().is_ok() {
+                return Ok(());
+            }
+        }
+        return Err("未找到可用终端（尝试过 gnome-terminal、konsole、xterm 等）".into());
+    }
+
+    actions::terminal_command_for(kind, path)
+        .spawn()
+        .map_err(|e| format!("打开终端失败: {e}"))?;
+    Ok(())
+}
+
 fn open_path(path: &str, target: &str, cfg: &settings::Settings) -> Result<(), String> {
     match target {
         // 设置里配置的默认编辑器（保留原有行为）
@@ -921,10 +946,7 @@ fn open_path(path: &str, target: &str, cfg: &settings::Settings) -> Result<(), S
                 .map_err(|e| format!("打开资源管理器失败: {e}"))?;
         }
         "terminal" => {
-            let kind = actions::detect_terminal(actions::wt_available());
-            actions::terminal_command_for(kind, path)
-                .spawn()
-                .map_err(|e| format!("打开终端失败: {e}"))?;
+            open_terminal(path)?;
         }
         // 其余目标是注册表里的编辑器/智能体（vscode、trae、opencode、zcode、dsh…）
         other => {
@@ -954,20 +976,48 @@ pub async fn copy_path(app: AppHandle, id: i64) -> Result<(), String> {
             let db = st.db.lock().map_err(|_| "数据库被占用")?;
             db.get(id)?.ok_or_else(|| "项目不存在".to_string())?.path
         };
-        let mut child = actions::clipboard_command()
-            .stdin(std::process::Stdio::piped())
-            .spawn()
-            .map_err(|e| format!("复制失败: {e}"))?;
-        let mut stdin = child.stdin.take().ok_or("无法写入剪贴板")?;
-        stdin
-            .write_all(path.as_bytes())
-            .map_err(|e| format!("复制失败: {e}"))?;
-        drop(stdin);
-        child.wait().map_err(|e| format!("复制失败: {e}"))?;
-        Ok(())
+        write_clipboard(&path)
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+/// 把文本写入系统剪贴板。
+/// Linux 上 wl-copy / xclip / xsel 不一定都装，按顺序找第一个可用的。
+fn write_clipboard(text: &str) -> Result<(), String> {
+    if cfg!(all(unix, not(target_os = "macos"))) {
+        for program in actions::linux_clipboard_candidates() {
+            if !actions::command_available(program) {
+                continue;
+            }
+            let spec = actions::linux_clipboard_spec(program);
+            if pipe_to_command(&spec, text).is_ok() {
+                return Ok(());
+            }
+        }
+        return Err("未找到剪贴板工具（可安装 wl-clipboard 或 xclip）".into());
+    }
+
+    let spec = actions::clipboard_spec();
+    pipe_to_command(&spec, text)
+}
+
+fn pipe_to_command(spec: &actions::CmdSpec, text: &str) -> Result<(), String> {
+    let mut child = std::process::Command::new(&spec.program)
+        .args(&spec.args)
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("复制失败: {e}"))?;
+    let mut stdin = child.stdin.take().ok_or("无法写入剪贴板")?;
+    stdin
+        .write_all(text.as_bytes())
+        .map_err(|e| format!("复制失败: {e}"))?;
+    drop(stdin);
+    let status = child.wait().map_err(|e| format!("复制失败: {e}"))?;
+    if !status.success() {
+        return Err(format!("剪贴板工具 {} 退出异常", spec.program));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
