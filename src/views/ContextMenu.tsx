@@ -31,6 +31,14 @@ interface Props {
 export default function ContextMenu({ x, y, items, onClose }: Props) {
   const ref = useRef<HTMLDivElement>(null);
   const [openSub, setOpenSub] = useState<number | null>(null);
+  const closeTimer = useRef<number | null>(null);
+
+  // 卸载时清掉延迟收起的定时器，避免对已卸载组件 setState
+  useEffect(() => {
+    return () => {
+      if (closeTimer.current) window.clearTimeout(closeTimer.current);
+    };
+  }, []);
 
   useEffect(() => {
     const onDown = (e: MouseEvent) => {
@@ -75,11 +83,24 @@ export default function ContextMenu({ x, y, items, onClose }: Props) {
           const open = openSub === i;
           const empty = (it.submenu?.length ?? 0) === 0;
           return (
-            <div key={it.label} className="ctxsub-wrap">
+            <div
+              key={it.label}
+              className="ctxsub-wrap"
+              onMouseEnter={() => {
+                if (closeTimer.current) {
+                  window.clearTimeout(closeTimer.current);
+                  closeTimer.current = null;
+                }
+                setOpenSub(i);
+              }}
+              onMouseLeave={() => {
+                // 延迟收起：允许鼠标从父项横向移到子菜单（中间有 3px 间隙）
+                closeTimer.current = window.setTimeout(() => setOpenSub(null), 180);
+              }}
+            >
               <button
                 role="menuitem"
                 className={`ctxitem ctxsub-trigger${open ? " active" : ""}`}
-                onMouseEnter={() => setOpenSub(i)}
                 onClick={() => setOpenSub(open ? null : i)}
               >
                 <span>{it.label}</span>

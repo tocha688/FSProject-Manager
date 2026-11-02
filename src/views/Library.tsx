@@ -8,6 +8,7 @@ import LockScreen from "./LockScreen";
 import ContextMenu from "./ContextMenu";
 import type { MenuItem } from "./ContextMenu";
 import type { EditorInfo } from "../lib/api";
+import { buildOpenSubmenu } from "../lib/editorMenu";
 import {
   applyFilter,
   buildFacets,
@@ -78,14 +79,23 @@ export default function Library() {
   const [showSettings, setShowSettings] = useState(false);
   const [status, setStatus] = useState<AppStatus>({ scanning: false, analyzing: false });
   const [filter, setFilter] = useState<FilterState>(EMPTY_FILTER);
-  // 本机可用的编辑器 / AI 智能体（进入页面时检测一次）
+  // 本机可用的编辑器 / AI 智能体。每次打开右键菜单时重新检测，
+  // 这样运行期间安装/卸载编辑器后，子菜单能立刻反映真实情况。
   const [editorsList, setEditorsList] = useState<EditorInfo[]>([]);
   // 锁屏
   const [locked, setLocked] = useState<boolean | null>(null); // null = 未知（加载中）
 
-  useEffect(() => {
-    api.listEditors().then(setEditorsList).catch(() => setEditorsList([]));
+  const refreshEditors = useCallback(async () => {
+    try {
+      setEditorsList(await api.listEditors());
+    } catch {
+      setEditorsList([]);
+    }
   }, []);
+
+  useEffect(() => {
+    void refreshEditors();
+  }, [refreshEditors]);
   // 右键菜单
   const [ctx, setCtx] = useState<{ x: number; y: number; project: Project } | null>(null);
   const [toast, setToast] = useState("");
@@ -261,11 +271,7 @@ export default function Library() {
     (p: Project): MenuItem[] => [
       {
         label: "打开",
-        submenu: editorsList.map((e) => ({
-          label: e.label,
-          hint: e.command,
-          onClick: () => act(p.id, e.id as OpenTarget),
-        })),
+        submenu: buildOpenSubmenu(editorsList, (id) => act(p.id, id as OpenTarget)),
         submenuEmptyHint: "未检测到任何编辑器（需命令在 PATH 中）",
       },
       { label: "在终端中打开", onClick: () => act(p.id, "terminal") },
@@ -422,8 +428,9 @@ export default function Library() {
               onClick={() => setSelected(p)}
               onContextMenu={(e) => {
                 e.preventDefault();
-                setSelected(p);
+                // 只弹菜单，不选中卡片（右侧详情面板保持原样）
                 setCtx({ x: e.clientX, y: e.clientY, project: p });
+                void refreshEditors();
               }}
             >
               <div className="card-top">

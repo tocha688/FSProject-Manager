@@ -862,36 +862,15 @@ pub async fn add_manual_project(
 // ---------- 打开动作 ----------
 
 /// 列出本机实际可用的编辑器 / AI 智能体（供右键子菜单动态渲染）。
-/// 结果在进程内缓存：命令是否存在不会运行时变化，避免每次右键都跑一遍 `where`。
+///
+/// 不做缓存：用户可能在应用运行期间安装或卸载编辑器，
+/// 每次展开菜单都重新检测，保证「移除了就真的消失」。
 #[tauri::command]
 pub async fn list_editors() -> Result<Vec<editors::EditorInfo>, String> {
-    use std::collections::HashMap;
-    use std::sync::OnceLock;
-    static CACHE: OnceLock<Mutex<HashMap<String, bool>>> = OnceLock::new();
-
     tauri::async_runtime::spawn_blocking(move || {
-        let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
         let mut available = Vec::new();
         for def in editors::EDITORS {
-            let mut found: Option<String> = None;
-            for cmd in def.commands {
-                let cached = cache.lock().ok().and_then(|g| g.get(*cmd).copied());
-                let hit = match cached {
-                    Some(v) => v,
-                    None => {
-                        let v = actions::command_available(cmd);
-                        if let Ok(mut g) = cache.lock() {
-                            g.insert((*cmd).to_string(), v);
-                        }
-                        v
-                    }
-                };
-                if hit {
-                    found = Some((*cmd).to_string());
-                    break;
-                }
-            }
-            if let Some(command) = found {
+            if let Some(command) = editors::resolve_command(def, actions::command_available) {
                 available.push(editors::EditorInfo {
                     id: def.id.to_string(),
                     label: def.label.to_string(),
