@@ -86,17 +86,19 @@ jobs:
           workspaces: src-tauri -> target
 
       # Linux 构建 Tauri 需要的系统依赖
+      # 注意：libappindicator3-dev 与 libayatana-appindicator3-dev 在 Ubuntu 22.04
+      # 上互斥（后者 Conflicts 前者），Tauri 2 用 ayatana 版本，不要两个都装。
       - name: Install Linux dependencies
         if: matrix.os == 'ubuntu-22.04'
         run: |
           sudo apt-get update
           sudo apt-get install -y \
             libwebkit2gtk-4.1-dev \
-            libappindicator3-dev \
+            libayatana-appindicator3-dev \
             librsvg2-dev \
             patchelf \
             build-essential \
-            curl wget file libssl-dev libgtk-3-dev libayatana-appindicator3-dev
+            curl wget file libssl-dev libgtk-3-dev
 
       - name: Install npm deps
         run: npm ci
