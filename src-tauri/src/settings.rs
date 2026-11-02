@@ -15,6 +15,38 @@ pub struct Settings {
     pub shortcut: String,
     pub editor_cmd: String,
     pub autostart: bool,
+    pub security: SecurityConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", default)]
+pub struct SecurityConfig {
+    /// 密码哈希（pbkdf2_sha256$...）。空串表示未设置密码，则不启用锁屏。
+    #[serde(default)]
+    pub password_hash: String,
+    /// 窗口失焦 / 系统空闲多久后自动上锁（分钟）。0 表示关闭该策略。
+    #[serde(default = "default_lock_minutes")]
+    pub idle_lock_minutes: u32,
+}
+
+fn default_lock_minutes() -> u32 {
+    1
+}
+
+impl Default for SecurityConfig {
+    fn default() -> Self {
+        SecurityConfig {
+            password_hash: String::new(),
+            idle_lock_minutes: 1,
+        }
+    }
+}
+
+impl SecurityConfig {
+    /// 是否启用了密码锁（只有设过密码才有意义）。
+    pub fn locked_enabled(&self) -> bool {
+        !self.password_hash.trim().is_empty()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -92,6 +124,7 @@ impl Default for Settings {
             shortcut: DEFAULT_SHORTCUT.into(),
             editor_cmd: DEFAULT_EDITOR_CMD.into(),
             autostart: false,
+            security: SecurityConfig::default(),
         }
     }
 }
@@ -112,6 +145,13 @@ impl SettingsView {
             settings: s,
             ai_verified,
         }
+    }
+
+    /// 给前端用的视图：绝不把密码哈希发出去。
+    pub fn sanitized(s: Settings) -> Self {
+        let mut s = s;
+        s.security.password_hash = String::new();
+        SettingsView::of(s)
     }
 }
 

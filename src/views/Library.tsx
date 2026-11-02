@@ -4,6 +4,9 @@ import * as api from "../lib/api";
 import type { AppStatus, OpenTarget, Project } from "../lib/types";
 import { relativeTime, statusLabel, truncatePath } from "../lib/format";
 import { countPending } from "../lib/project";
+import LockScreen from "./LockScreen";
+import ContextMenu from "./ContextMenu";
+import type { MenuItem } from "./ContextMenu";
 import {
   applyFilter,
   buildFacets,
@@ -74,6 +77,10 @@ export default function Library() {
   const [showSettings, setShowSettings] = useState(false);
   const [status, setStatus] = useState<AppStatus>({ scanning: false, analyzing: false });
   const [filter, setFilter] = useState<FilterState>(EMPTY_FILTER);
+  // 锁屏
+  const [locked, setLocked] = useState<boolean | null>(null); // null = 未知（加载中）
+  // 右键菜单
+  const [ctx, setCtx] = useState<{ x: number; y: number; project: Project } | null>(null);
   const [toast, setToast] = useState("");
   const queryRef = useRef(query);
   queryRef.current = query;
@@ -99,6 +106,42 @@ export default function Library() {
   useEffect(() => {
     refresh("");
   }, [refresh]);
+
+  // ---- 锁屏：启动查询 + 活动上报 + 自动锁轮询 ----
+  useEffect(() => {
+    let alive = true;
+    api
+      .getLockState()
+      .then((s) => alive && setLocked(s.locked))
+      .catch(() => alive && setLocked(false));
+
+    // 键鼠活动 → 上报（节流 5 秒，避免频繁 IPC）
+    let lastSent = 0;
+    const onActivity = () => {
+      const now = Date.now();
+      if (now - lastSent < 5000) return;
+      lastSent = now;
+      void api.touchActivity().catch(() => {});
+    };
+    const events = ["mousedown", "keydown", "wheel", "touchstart"] as const;
+    for (const e of events) window.addEventListener(e, onActivity, { passive: true });
+
+    // 每 10 秒检查是否该自动上锁（空闲 / 后台超时）
+    const timer = window.setInterval(async () => {
+      try {
+        const s = await api.checkAutoLock();
+        if (alive) setLocked(s.locked);
+      } catch {
+        /* 忽略 */
+      }
+    }, 10000);
+
+    return () => {
+      alive = false;
+      for (const e of events) window.removeEventListener(e, onActivity);
+      window.clearInterval(timer);
+    };
+  }, []);
 
   useEffect(() => {
     const t = window.setTimeout(() => refresh(query), query ? 200 : 0);
@@ -144,6 +187,7 @@ export default function Library() {
     },
     [notify],
   );
+
   const doScan = useCallback(async () => {
     try {
       notify("扫描中…");
@@ -180,8 +224,62 @@ export default function Library() {
     }
   }, [notify, refresh]);
 
+  // 右键菜单里的「彻底删除」：二次确认 + 显示将要删除的路径
+  const purge = useCallback(
+    async (p: Project) => {
+      const okToDelete = window.confirm(
+        `确定要彻底删除这个项目吗？\n\n` +
+          `${p.name}\n${p.path}\n\n` +
+          `⚠️ 会同时删除磁盘上的整个文件夹（不进回收站），此操作不可恢复！`,
+      );
+      if (!okToDelete) return;
+      try {
+        const r = await api.purgeProject(p.id, p.path);
+        notify(
+          r.removedFolder
+            ? `已删除项目及文件夹：${p.name}`
+            : `已从库中移除（文件夹本就不存在）：${p.name}`,
+        );
+        if (selected?.id === p.id) setSelected(null);
+        refresh(queryRef.current);
+      } catch (e) {
+        notify(String(e));
+      }
+    },
+    [notify, refresh, selected],
+  );
+
+  // 构建某项目的右键菜单项
+  const menuItemsFor = useCallback(
+    (p: Project): MenuItem[] => [
+      { label: "打开文件夹", onClick: () => act(p.id, "folder") },
+      { label: "在终端中打开", onClick: () => act(p.id, "terminal") },
+      { label: "用 VS Code 打开", onClick: () => act(p.id, "vscode") },
+      { label: "用 Trae 打开", onClick: () => act(p.id, "trae") },
+      { label: "复制路径", onClick: () => copy(p.id) },
+      {
+        label: "删除项目（含文件夹）",
+        danger: true,
+        onClick: () => void purge(p),
+      },
+    ],
+    [act, copy, purge],
+  );
+
   if (showSettings) {
     return <Settings onBack={() => setShowSettings(false)} />;
+  }
+
+  // 锁屏优先于一切：未解锁时不渲染任何项目内容
+  if (locked === null) {
+    return (
+      <div className="app">
+        <p className="dim" style={{ padding: 24 }}>加载中…</p>
+      </div>
+    );
+  }
+  if (locked) {
+    return <LockScreen onUnlocked={() => setLocked(false)} />;
   }
 
   const busy = status.scanning || status.analyzing;
@@ -308,6 +406,11 @@ export default function Library() {
               key={p.id}
               className={`card ${selected?.id === p.id ? "sel" : ""}`}
               onClick={() => setSelected(p)}
+              onContextMenu={(e) => {
+                e.preventDefault();
+                setSelected(p);
+                setCtx({ x: e.clientX, y: e.clientY, project: p });
+              }}
             >
               <div className="card-top">
                 <span className="name">{p.name}</span>
@@ -340,6 +443,14 @@ export default function Library() {
         )}
       </div>
 
+      {ctx && (
+        <ContextMenu
+          x={ctx.x}
+          y={ctx.y}
+          items={menuItemsFor(ctx.project)}
+          onClose={() => setCtx(null)}
+        />
+      )}
       {toast && <div className="toast">{toast}</div>}
     </div>
   );

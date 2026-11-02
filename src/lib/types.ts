@@ -13,12 +13,18 @@ export interface AiConfig {
   verifiedFingerprint: string;
 }
 
+export interface SecurityConfig {
+  passwordHash: string;
+  idleLockMinutes: number;
+}
+
 export interface Settings {
   roots: RootConfig[];
   ai: AiConfig;
   shortcut: string;
   editorCmd: string;
   autostart: boolean;
+  security: SecurityConfig;
 }
 
 /** get_settings 的返回：附带后端权威判定的"是否已验证" */
@@ -64,4 +70,4 @@ export interface DataInfo {
   configPath: string;
 }
 
-export type OpenTarget = "editor" | "folder" | "terminal";
+export type OpenTarget = "editor" | "folder" | "terminal" | "vscode" | "trae";

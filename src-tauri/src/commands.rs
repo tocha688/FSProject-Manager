@@ -1,11 +1,11 @@
 use std::io::Write;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::Mutex;
 use tauri::{AppHandle, Manager};
 
 use crate::analyzer::Provider;
-use crate::{actions, analyzer, db, detect, scan, search, settings, signals};
+use crate::{actions, analyzer, auth, db, detect, scan, search, security, settings, signals};
 use tauri_plugin_autostart::ManagerExt as _;
 
 pub struct AppState {
@@ -13,6 +13,17 @@ pub struct AppState {
     pub data_dir: PathBuf,
     pub scanning: AtomicBool,
     pub analyzing: AtomicBool,
+    /// 已解锁？应用启动即为未解锁（若设了密码）。
+    pub unlocked: AtomicBool,
+    /// 最近一次用户活动时间（unix 秒）。用于空闲自动上锁。
+    pub last_activity: AtomicI64,
+}
+
+fn now_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64
 }
 
 #[derive(serde::Serialize)]
@@ -70,12 +81,155 @@ pub fn hide_quick(app: AppHandle) {
     }
 }
 
+// ---------- 锁屏 ----------
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LockState {
+    /// 是否设置了密码（决定是否需要锁）
+    pub has_password: bool,
+    /// 当前是否处于锁定状态
+    pub locked: bool,
+    /// 空闲多少分钟后自动上锁（0 = 不自动锁）
+    pub idle_lock_minutes: u32,
+    /// 已空闲秒数，供前端显示
+    pub idle_seconds: i64,
+}
+
+fn lock_state_of(app: &AppHandle) -> LockState {
+    let st = app.state::<AppState>();
+    let cfg = settings::load(&st.data_dir);
+    let has_password = cfg.security.locked_enabled();
+    let idle = now_secs() - st.last_activity.load(Ordering::SeqCst);
+    LockState {
+        has_password,
+        locked: has_password && !st.unlocked.load(Ordering::SeqCst),
+        idle_lock_minutes: cfg.security.idle_lock_minutes,
+        idle_seconds: idle.max(0),
+    }
+}
+
+#[tauri::command]
+pub fn get_lock_state(app: AppHandle) -> LockState {
+    lock_state_of(&app)
+}
+
+/// 记录一次用户活动（前端在键鼠输入时调用）。
+#[tauri::command]
+pub fn touch_activity(app: AppHandle) {
+    let st = app.state::<AppState>();
+    st.last_activity.store(now_secs(), Ordering::SeqCst);
+}
+
+/// 立即上锁（托盘菜单/快捷键可用）。
+#[tauri::command]
+pub fn lock_now(app: AppHandle) {
+    let st = app.state::<AppState>();
+    let cfg = settings::load(&st.data_dir);
+    if cfg.security.locked_enabled() {
+        st.unlocked.store(false, Ordering::SeqCst);
+    }
+}
+
+/// 周期性检查是否该因空闲/后台而上锁；前端也会主动查询状态。
+#[tauri::command]
+pub fn check_auto_lock(app: AppHandle) -> LockState {
+    let st = app.state::<AppState>();
+    let cfg = settings::load(&st.data_dir);
+    let has_password = cfg.security.locked_enabled();
+    let idle = now_secs() - st.last_activity.load(Ordering::SeqCst);
+
+    if security::should_lock_on_idle(has_password, cfg.security.idle_lock_minutes, idle) {
+        st.unlocked.store(false, Ordering::SeqCst);
+    }
+    // 窗口不可见超过阈值也上锁（"置于后台"）
+    let backgrounded = app
+        .get_webview_window("main")
+        .and_then(|w| w.is_visible().ok())
+        .map(|v| !v)
+        .unwrap_or(false);
+    if backgrounded
+        && security::should_lock_on_background(
+            has_password,
+            cfg.security.idle_lock_minutes,
+            idle,
+        )
+    {
+        st.unlocked.store(false, Ordering::SeqCst);
+    }
+    lock_state_of(&app)
+}
+
+/// 用密码解锁。
+#[tauri::command]
+pub fn unlock(app: AppHandle, password: String) -> Result<bool, String> {
+    let st = app.state::<AppState>();
+    let cfg = settings::load(&st.data_dir);
+    if !cfg.security.locked_enabled() {
+        st.unlocked.store(true, Ordering::SeqCst);
+        return Ok(true);
+    }
+    if auth::verify_password(&password, &cfg.security.password_hash) {
+        st.unlocked.store(true, Ordering::SeqCst);
+        st.last_activity.store(now_secs(), Ordering::SeqCst);
+        Ok(true)
+    } else {
+        Ok(false)
+    }
+}
+
+/// 设置/修改密码。`old_password` 在已设过密码时必填。
+#[tauri::command]
+pub fn set_password(
+    app: AppHandle,
+    old_password: Option<String>,
+    new_password: Option<String>,
+    idle_lock_minutes: Option<u32>,
+) -> Result<(), String> {
+    let st = app.state::<AppState>();
+    let mut cfg = settings::load(&st.data_dir);
+    let has_existing = cfg.security.locked_enabled();
+
+    if has_existing {
+        let old = old_password.unwrap_or_default();
+        if !auth::verify_password(&old, &cfg.security.password_hash) {
+            return Err("原密码不正确".into());
+        }
+    }
+
+    match new_password {
+        // 传空串 = 清除密码（关闭锁屏）
+        Some(p) if p.trim().is_empty() => {
+            if !has_existing {
+                return Err("当前没有设置密码".into());
+            }
+            cfg.security.password_hash.clear();
+            st.unlocked.store(true, Ordering::SeqCst);
+        }
+        Some(p) => {
+            if p.chars().count() < 4 {
+                return Err("密码至少 4 个字符".into());
+            }
+            cfg.security.password_hash = auth::hash_password(&p);
+            st.unlocked.store(true, Ordering::SeqCst);
+        }
+        None => {}
+    }
+
+    if let Some(m) = idle_lock_minutes {
+        cfg.security.idle_lock_minutes = m.min(120);
+    }
+    settings::save(&st.data_dir, &cfg)?;
+    st.last_activity.store(now_secs(), Ordering::SeqCst);
+    Ok(())
+}
+
 // ---------- 设置 ----------
 
 #[tauri::command]
 pub fn get_settings(app: AppHandle) -> settings::SettingsView {
     let st = app.state::<AppState>();
-    settings::SettingsView::of(settings::load(&st.data_dir))
+    settings::SettingsView::sanitized(settings::load(&st.data_dir))
 }
 
 #[tauri::command]
@@ -546,9 +700,85 @@ pub async fn update_tags(app: AppHandle, id: i64, tags: Vec<String>) -> Result<(
     with_db(app, move |db| db.update_tags(id, &tags)).await
 }
 
+/// 仅从数据库移除记录，不动磁盘文件。
 #[tauri::command]
 pub async fn delete_project(app: AppHandle, id: i64) -> Result<(), String> {
     with_db(app, move |db| db.delete(id)).await
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PurgeResult {
+    /// 数据库记录是否已删除
+    pub removed_from_db: bool,
+    /// 文件夹是否真的被删掉了（不存在也算 true）
+    pub removed_folder: bool,
+}
+
+/// 彻底删除：项目文件夹（快速删除）+ 数据库记录。
+///
+/// 安全措施：
+/// 1. 路径必须通过 security::is_safe_delete_target（拒绝盘符根、用户主目录及其祖先、相对路径）
+/// 2. 必须显式传 confirm=true，前端有二次确认弹窗
+/// 3. 若传了 expected_path，必须与库中记录的路径完全一致（防止 id 错位删错项目）
+/// 4. 只删该项目的根文件夹，不递归到父级
+#[tauri::command]
+pub async fn purge_project(
+    app: AppHandle,
+    id: i64,
+    confirm: bool,
+    expected_path: Option<String>,
+) -> Result<PurgeResult, String> {
+    if !confirm {
+        return Err("未确认删除".into());
+    }
+    tauri::async_runtime::spawn_blocking(move || -> Result<PurgeResult, String> {
+        let st = app.state::<AppState>();
+        // 取出路径后立即释放锁，删除文件系统操作绝不持锁
+        let path = {
+            let db = st.db.lock().map_err(|_| "数据库被占用")?;
+            let row = db.get(id)?.ok_or_else(|| "项目不存在".to_string())?;
+            if let Some(expected) = expected_path {
+                if !expected.is_empty() && expected != row.path {
+                    return Err(format!(
+                        "路径不匹配，已中止（库中为 {}，请求为 {}）",
+                        row.path, expected
+                    ));
+                }
+            }
+            row.path
+        };
+
+        let home = dirs::home_dir();
+        if !security::is_safe_delete_target(&path, home.as_deref()) {
+            return Err(format!("拒绝删除不安全的路径：{path}"));
+        }
+
+        let target = std::path::Path::new(&path);
+        let mut removed_folder = true;
+        if target.exists() {
+            // 快速删除：直接递归删除，不进回收站（Windows 上大目录明显更快）
+            std::fs::remove_dir_all(target)
+                .map_err(|e| format!("删除文件夹失败：{e}（文件可能被占用）"))?;
+            removed_folder = !target.exists();
+            if !removed_folder {
+                return Err("文件夹删除后仍然存在，可能被占用".into());
+            }
+        }
+
+        let removed_from_db = {
+            let db = st.db.lock().map_err(|_| "数据库被占用")?;
+            db.delete(id)?;
+            db.get(id)?.is_none()
+        };
+        eprintln!("[purge] #{id} 已删除：{path}");
+        Ok(PurgeResult {
+            removed_from_db,
+            removed_folder,
+        })
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -660,6 +890,23 @@ fn open_path(path: &str, target: &str, cfg: &settings::Settings) -> Result<(), S
             actions::editor_command(path, &cfg.editor_cmd)
                 .spawn()
                 .map_err(|e| format!("启动编辑器失败（检查设置中的编辑器命令）: {e}"))?;
+        }
+        // 右键菜单里的固定编辑器目标（不受设置影响）
+        "vscode" => {
+            if !actions::command_available("code") {
+                return Err("找不到 VS Code 命令 code：请确认已加入 PATH".into());
+            }
+            actions::editor_command(path, "code")
+                .spawn()
+                .map_err(|e| format!("启动 VS Code 失败: {e}"))?;
+        }
+        "trae" => {
+            if !actions::command_available("trae") {
+                return Err("找不到 Trae 命令 trae：请确认已加入 PATH 或在设置里配置".into());
+            }
+            actions::editor_command(path, "trae")
+                .spawn()
+                .map_err(|e| format!("启动 Trae 失败: {e}"))?;
         }
         "folder" => {
             actions::folder_command(path)

@@ -1,14 +1,16 @@
 mod actions;
+mod auth;
 mod analyzer;
 mod commands;
 mod db;
 mod detect;
 mod scan;
 mod search;
+mod security;
 mod settings;
 mod signals;
 
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicI64};
 use std::sync::Mutex;
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
@@ -73,11 +75,21 @@ pub fn run() {
             std::fs::create_dir_all(&data_dir).ok();
             let database = db::Db::open(&settings::db_path(&data_dir))
                 .map_err(|e| format!("打开数据库失败: {e}"))?;
+            let startup_cfg = settings::load(&data_dir);
+            let using_password = startup_cfg.security.locked_enabled();
             app.manage(commands::AppState {
                 db: Mutex::new(database),
                 data_dir,
                 scanning: AtomicBool::new(false),
                 analyzing: AtomicBool::new(false),
+                // 设了密码则启动即锁定，必须解锁后才能看项目
+                unlocked: AtomicBool::new(!using_password),
+                last_activity: AtomicI64::new(
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_secs() as i64)
+                        .unwrap_or(0),
+                ),
             });
 
             let cfg = settings::load(app.state::<commands::AppState>().data_dir.as_path());
@@ -134,6 +146,13 @@ pub fn run() {
             commands::data_info,
             commands::set_autostart,
             commands::hide_quick,
+            commands::get_lock_state,
+            commands::check_auto_lock,
+            commands::touch_activity,
+            commands::lock_now,
+            commands::unlock,
+            commands::set_password,
+            commands::purge_project,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

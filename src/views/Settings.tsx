@@ -8,10 +8,17 @@ export default function Settings({ onBack }: { onBack: () => void }) {
   const [info, setInfo] = useState<DataInfo | null>(null);
   const [toast, setToast] = useState("");
   const [testing, setTesting] = useState(false);
+  // 密码管理
+  const [oldPwd, setOldPwd] = useState("");
+  const [newPwd, setNewPwd] = useState("");
+  const [confirmPwd, setConfirmPwd] = useState("");
+  const [pwdBusy, setPwdBusy] = useState(false);
+  const [hasPassword, setHasPassword] = useState(false);
 
   useEffect(() => {
     api.getSettings().then(setS).catch((e) => setToast(String(e)));
     api.getDataInfo().then(setInfo).catch(() => {});
+    api.getLockState().then((l) => setHasPassword(l.hasPassword)).catch(() => {});
   }, []);
 
   if (!s) {
@@ -26,6 +33,53 @@ export default function Settings({ onBack }: { onBack: () => void }) {
     setToast(m);
     window.setTimeout(() => setToast((t) => (t === m ? "" : t)), 3500);
   };
+
+  const savePassword = async () => {
+    if (newPwd !== confirmPwd) {
+      notify("两次输入的新密码不一致");
+      return;
+    }
+    if (newPwd.length < 4) {
+      notify("密码至少 4 个字符");
+      return;
+    }
+    setPwdBusy(true);
+    try {
+      await api.setPassword(hasPassword ? oldPwd : null, newPwd, s.security?.idleLockMinutes);
+      setHasPassword(true);
+      setOldPwd("");
+      setNewPwd("");
+      setConfirmPwd("");
+      notify("密码已设置");
+    } catch (e) {
+      notify(String(e));
+    }
+    setPwdBusy(false);
+  };
+
+  const clearPassword = async () => {
+    if (!window.confirm("清除密码后将不再需要解锁，确定吗？")) return;
+    setPwdBusy(true);
+    try {
+      await api.setPassword(oldPwd, "", s.security?.idleLockMinutes);
+      setHasPassword(false);
+      setOldPwd("");
+      notify("密码已清除，锁屏已关闭");
+    } catch (e) {
+      notify(String(e));
+    }
+    setPwdBusy(false);
+  };
+
+  const lockNow = async () => {
+    try {
+      await api.lockNow();
+      notify("已锁定，返回后可看到锁屏");
+    } catch (e) {
+      notify(String(e));
+    }
+  };
+
 
   const patch = (u: Partial<SettingsView>) => setS({ ...s, ...u });
   const patchAi = (u: Partial<SettingsView["ai"]>) => setS({ ...s, ai: { ...s.ai, ...u } });
@@ -57,7 +111,6 @@ export default function Settings({ onBack }: { onBack: () => void }) {
   };
 
   const test = async () => {
-    setTesting(true);
     try {
       const { aiVerified: _omit, ...payload } = s;
       await api.saveSettings(payload);
@@ -226,6 +279,78 @@ export default function Settings({ onBack }: { onBack: () => void }) {
             </p>
           )}
         </section>
+        <section>
+          <h2>密码保护</h2>
+          <p className="dim">
+            设置密码后，启动应用、长时间无操作、以及窗口退到后台超时，都需要输入密码才能查看项目。
+          </p>
+          <p className="dim small">
+            当前状态：{s.security?.passwordHash ? "已设置密码" : "未设置密码"}
+          </p>
+
+          <div className="row wrap">
+            {(s.security?.passwordHash || hasPassword) && (
+              <label className="inline">
+                原密码
+                <input
+                  type="password"
+                  value={oldPwd}
+                  onChange={(e) => setOldPwd(e.target.value)}
+                  placeholder="修改或清除时必填"
+                />
+              </label>
+            )}
+            <label className="inline">
+              {hasPassword ? "新密码" : "设置密码"}
+              <input
+                type="password"
+                value={newPwd}
+                onChange={(e) => setNewPwd(e.target.value)}
+                placeholder="至少 4 个字符"
+              />
+            </label>
+            <label className="inline">
+              确认
+              <input
+                type="password"
+                value={confirmPwd}
+                onChange={(e) => setConfirmPwd(e.target.value)}
+              />
+            </label>
+            <label className="inline">
+              空闲自动锁定
+              <input
+                type="number"
+                min={0}
+                max={120}
+                value={s.security?.idleLockMinutes ?? 1}
+                onChange={(e) =>
+                  patch({
+                    security: {
+                      ...(s.security ?? { passwordHash: "" }),
+                      idleLockMinutes: Number(e.target.value) || 0,
+                    },
+                  })
+                }
+                style={{ width: "4.5em" }}
+              />
+              分钟（0 = 不自动锁）
+            </label>
+          </div>
+
+          <div className="row wrap">
+            <button className="primary" onClick={savePassword} disabled={pwdBusy}>
+              {hasPassword ? "更新密码" : "设置密码"}
+            </button>
+            {hasPassword && (
+              <button className="danger" onClick={clearPassword} disabled={pwdBusy}>
+                清除密码（关闭锁屏）
+              </button>
+            )}
+            {hasPassword && <button onClick={lockNow}>立即锁定</button>}
+          </div>
+        </section>
+
       </div>
 
       {toast && <div className="toast">{toast}</div>}
