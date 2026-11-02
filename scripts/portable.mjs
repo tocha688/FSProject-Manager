@@ -25,7 +25,12 @@ const releaseDir = join(root, "src-tauri/target/release");
 
 const platform = process.platform; // win32 | linux | darwin
 const arch = process.arch; // x64 | arm64
+
+// 命名里带上明确的操作系统标识，避免三平台的同名产物互相混淆
+// （例如 Linux 与 Windows 都是 x64，只看架构无法区分）。
+const osLabel = platform === "win32" ? "windows" : platform === "darwin" ? "macos" : "linux";
 const archLabel = arch === "x64" ? "x64" : arch === "arm64" ? "aarch64" : arch;
+const namePrefix = `${productName}_${version}_${osLabel}_${archLabel}`;
 
 function fail(msg) {
   console.error(`✗ ${msg}`);
@@ -82,7 +87,7 @@ if (platform === "win32") {
   copyFileSync(exe, join(staging, `${productName}.exe`));
   writeFileSync(join(staging, "使用说明.txt"), readme, "utf8");
 
-  artifact = join(outDir, `${productName}_${version}_${archLabel}_portable.zip`);
+  artifact = join(outDir, `${namePrefix}_portable.zip`);
   // -y 不交互，-r 递归，-q 静默；Windows 10+ 自带 tar 支持 zip
   execSync(
     `powershell -NoProfile -Command "Compress-Archive -Path '${staging}\\*' -DestinationPath '${artifact}' -Force"`,
@@ -96,7 +101,7 @@ if (platform === "win32") {
   execSync(`cp -R "${appDir}" "${staging}/"`, { stdio: "inherit" });
   writeFileSync(join(staging, "README.txt"), readme, "utf8");
 
-  artifact = join(outDir, `${productName}_${version}_${archLabel}_portable.tar.gz`);
+  artifact = join(outDir, `${namePrefix}_portable.tar.gz`);
   execSync(`tar -czf "${artifact}" -C "${staging}" .`, { stdio: "inherit" });
 } else {
   // Linux：优先 AppImage（真正免安装），没有就回退裸二进制
@@ -124,7 +129,7 @@ if (platform === "win32") {
     { mode: 0o755 },
   );
 
-  artifact = join(outDir, `${productName}_${version}_${archLabel}_portable.tar.gz`);
+  artifact = join(outDir, `${namePrefix}_portable.tar.gz`);
   execSync(`tar -czf "${artifact}" -C "${staging}" .`, { stdio: "inherit" });
 }
 
