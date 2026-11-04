@@ -100,28 +100,38 @@ export default function Settings({ onBack }: { onBack: () => void }) {
   const save = async () => {
     try {
       const { aiVerified: _omit, ...payload } = s;
+      const wantEnabled = s.ai.enabled;
       await api.saveSettings(payload);
       // 回读：后端可能因校验未通过而把 enabled 强制关掉
       const fresh = await api.getSettings();
       setS(fresh);
-      notify("设置已保存");
+      if (wantEnabled && !fresh.ai.enabled) {
+        notify("已保存，但 AI 分析未能启用：配置未通过连接测试，请先点「测试连接」");
+      } else {
+        notify("设置已保存");
+      }
     } catch (e) {
       notify(String(e));
     }
   };
 
   const test = async () => {
+    setTesting(true);
+    notify("正在测试连接…");
     try {
       const { aiVerified: _omit, ...payload } = s;
+      // 先落盘当前配置，测试才会用最新的地址/模型/Key
       await api.saveSettings(payload);
-      const msg = await api.testAi();
+      const r = await api.testAi();
+      // 后端已写入指纹，回读即可解锁开关（不必再手动保存一次）
       const fresh = await api.getSettings();
-      setS(fresh);
-      notify(msg);
+      setS({ ...fresh, aiVerified: true });
+      notify(r.message);
     } catch (e) {
-      notify(String(e));
+      notify(`测试失败：${String(e)}`);
+    } finally {
+      setTesting(false);
     }
-    setTesting(false);
   };
 
   return (

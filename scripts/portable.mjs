@@ -20,6 +20,9 @@ const pkg = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
 
 const version = tauriConf.version;
 const productName = tauriConf.productName;
+// 产物文件名统一用 ASCII 前缀：中文名在部分系统/CI 工具链里会引发编码问题，
+// 而桌面快捷方式与窗口标题用的是 productName（可为中文）。
+const FILE_PREFIX = "ProjectFinder";
 const outDir = join(root, "src-tauri/target/release/bundle/portable");
 const releaseDir = join(root, "src-tauri/target/release");
 
@@ -30,7 +33,7 @@ const arch = process.arch; // x64 | arm64
 // （例如 Linux 与 Windows 都是 x64，只看架构无法区分）。
 const osLabel = platform === "win32" ? "windows" : platform === "darwin" ? "macos" : "linux";
 const archLabel = arch === "x64" ? "x64" : arch === "arm64" ? "aarch64" : arch;
-const namePrefix = `${productName}_${version}_${osLabel}_${archLabel}`;
+const namePrefix = `${FILE_PREFIX}_${version}_${osLabel}_${archLabel}`;
 
 function fail(msg) {
   console.error(`✗ ${msg}`);
@@ -80,15 +83,20 @@ const readme = `项目快搜 ${productName} v${version} — 便携版
 let artifact;
 
 if (platform === "win32") {
-  const exe = requirePath(
-    join(releaseDir, "project-mg-app.exe"),
-    "先运行 npm run tauri build 生成可执行文件",
-  );
-  copyFileSync(exe, join(staging, `${productName}.exe`));
+  // 可执行文件名可能跟随 productName（中文）或保持 Cargo 包名，两种都找
+  const candidates = [`${productName}.exe`, "project-mg-app.exe"];
+  let exe = null;
+  for (const c of candidates) {
+    const p = join(releaseDir, c);
+    if (existsSync(p)) { exe = p; break; }
+  }
+  if (!exe) {
+    fail(`找不到可执行文件（尝试过 ${candidates.join(", ")}）\n  先运行 npm run tauri build`);
+  }
+  copyFileSync(exe, join(staging, `${FILE_PREFIX}.exe`));
   writeFileSync(join(staging, "使用说明.txt"), readme, "utf8");
 
   artifact = join(outDir, `${namePrefix}_portable.zip`);
-  // -y 不交互，-r 递归，-q 静默；Windows 10+ 自带 tar 支持 zip
   execSync(
     `powershell -NoProfile -Command "Compress-Archive -Path '${staging}\\*' -DestinationPath '${artifact}' -Force"`,
     { stdio: "inherit" },
@@ -112,20 +120,20 @@ if (platform === "win32") {
     if (found) appImage = join(appimageDir, found);
   }
   if (appImage) {
-    copyFileSync(appImage, join(staging, `${productName}.AppImage`));
+    copyFileSync(appImage, join(staging, `${FILE_PREFIX}.AppImage`));
   } else {
     const bin = requirePath(
       join(releaseDir, "project-mg-app"),
       "先运行 npm run tauri build（Linux 需要 webkit2gtk 等系统依赖）",
     );
-    copyFileSync(bin, join(staging, `${productName}`));
+    copyFileSync(bin, join(staging, `${FILE_PREFIX}`));
   }
   writeFileSync(join(staging, "README.txt"), readme, "utf8");
   // 启动脚本：自动加可执行权限
   writeFileSync(
     join(staging, "启动.sh"),
-    `#!/bin/sh\ncd "$(dirname "$0")"\nchmod +x "${productName}"* 2>/dev/null\n` +
-      (appImage ? `exec "./${productName}.AppImage" "$@"\n` : `exec "./${productName}" "$@"\n`),
+    `#!/bin/sh\ncd "$(dirname "$0")"\nchmod +x "${FILE_PREFIX}"* 2>/dev/null\n` +
+      (appImage ? `exec "./${FILE_PREFIX}.AppImage" "$@"\n` : `exec "./${FILE_PREFIX}" "$@"\n`),
     { mode: 0o755 },
   );
 

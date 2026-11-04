@@ -235,9 +235,13 @@ pub fn get_settings(app: AppHandle) -> settings::SettingsView {
 #[tauri::command]
 pub fn save_settings(app: AppHandle, s: settings::Settings) -> Result<(), String> {
     let mut s = s;
-    settings::normalize(&mut s);
     {
         let st = app.state::<AppState>();
+        let existing = settings::load(&st.data_dir);
+        // 关键：前端提交的指纹可能是空的（例如只在界面上改了个数字），
+        // 但只要配置内容本身没变，就沿用磁盘上已验证的指纹，
+        // 否则 enabled 会被误判为"未验证"而强制关闭。
+        settings::normalize_preserving_verification(&mut s, &existing);
         settings::save(&st.data_dir, &s)?;
     }
     crate::register_shortcut(&app, &s.shortcut)?;
@@ -515,21 +519,44 @@ pub async fn analyze_project(app: AppHandle, id: i64) -> Result<(), String> {
     .map_err(|e| e.to_string())?
 }
 
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TestAiResult {
+    pub ok: bool,
+    /// 展示给用户的文案（成功含模型回复，失败含原因）
+    pub message: String,
+    /// 请求耗时（毫秒），让用户知道确实是真连了一次
+    pub elapsed_ms: u64,
+    /// 测试通过后的配置指纹（前端可据此立即解锁开关，无需等保存）
+    pub verified_fingerprint: String,
+}
+
 #[tauri::command]
-pub async fn test_ai(app: AppHandle) -> Result<String, String> {
+pub async fn test_ai(app: AppHandle) -> Result<TestAiResult, String> {
     let handle = app.clone();
-    tauri::async_runtime::spawn_blocking(move || {
+    tauri::async_runtime::spawn_blocking(move || -> Result<TestAiResult, String> {
         let st = handle.state::<AppState>();
         let mut cfg = settings::load(&st.data_dir);
         if !settings::ai_configured(&cfg.ai) {
             return Err("请先填写 API 地址和 Key".into());
         }
         let provider = analyzer::from_config(&cfg.ai);
+        let started = std::time::Instant::now();
         let a = provider.analyze("ping", "未知", &signals::Signals::empty())?;
+        let elapsed_ms = started.elapsed().as_millis() as u64;
         // 测试通过：记录本次配置指纹，允许开启开关
         cfg.ai.verified_fingerprint = settings::ai_fingerprint(&cfg.ai);
         settings::save(&st.data_dir, &cfg)?;
-        Ok(format!("连接成功，模型返回：{}", a.description))
+        Ok(TestAiResult {
+            ok: true,
+            message: format!(
+                "连接成功（{}ms），模型返回：{}",
+                elapsed_ms,
+                a.description
+            ),
+            elapsed_ms,
+            verified_fingerprint: cfg.ai.verified_fingerprint,
+        })
     })
     .await
     .map_err(|e| e.to_string())?

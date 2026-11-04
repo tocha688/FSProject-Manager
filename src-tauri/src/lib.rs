@@ -66,6 +66,41 @@ fn build_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+/// 启动阶段遇到无法恢复的错误时，用系统原生弹窗告知用户。
+/// 此时 WebView 可能还没起来，不能依赖前端 UI。
+fn show_fatal_error(message: &str) {
+    #[cfg(windows)]
+    {
+        use std::ffi::OsStr;
+        use std::os::windows::ffi::OsStrExt;
+        #[link(name = "user32")]
+        extern "system" {
+            fn MessageBoxW(hwnd: *mut u8, text: *const u16, caption: *const u16, utype: u32) -> i32;
+        }
+        let to_wide = |s: &str| -> Vec<u16> {
+            OsStr::new(s)
+                .encode_wide()
+                .chain(std::iter::once(0))
+                .collect()
+        };
+        let text = to_wide(message);
+        let caption = to_wide("项目快搜 — 启动失败");
+        // SAFETY: 两个指针都指向以 NUL 结尾的有效 UTF-16 缓冲区
+        unsafe {
+            MessageBoxW(
+                std::ptr::null_mut(),
+                text.as_ptr(),
+                caption.as_ptr(),
+                0x0000_0010, // MB_ICONERROR
+            );
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        eprintln!("[project-finder] 启动失败: {message}");
+    }
+}
+
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
@@ -73,9 +108,28 @@ pub fn run() {
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .setup(|app| {
             let data_dir = settings::data_dir();
-            std::fs::create_dir_all(&data_dir).ok();
-            let database = db::Db::open(&settings::db_path(&data_dir))
-                .map_err(|e| format!("打开数据库失败: {e}"))?;
+            if let Err(e) = std::fs::create_dir_all(&data_dir) {
+                eprintln!("[project-finder] 创建数据目录失败 {data_dir:?}: {e}");
+            }
+            // 数据库打不开时不要退出：用内存库兜底让界面能起来，
+            // 用户可以在设置里改数据目录，或看到明确的错误提示。
+            let database = match db::Db::open(&settings::db_path(&data_dir)) {
+                Ok(d) => d,
+                Err(e) => {
+                    let msg = format!(
+                        "无法打开数据库：{e}\n\n数据目录：{}\n\n\
+                         本次将以临时模式运行（数据不会保存）。\
+                         请检查该目录是否可写，或设置环境变量 PF_DATA_DIR 指向可写目录。",
+                        data_dir.display()
+                    );
+                    eprintln!("[project-finder] {msg}");
+                    show_fatal_error(&msg);
+                    // 内存库兜底：界面可用，只是重启后数据丢失
+                    db::Db::open_in_memory().unwrap_or_else(|e2| {
+                        panic!("连内存数据库都无法创建: {e2}")
+                    })
+                }
+            };
             let startup_cfg = settings::load(&data_dir);
             let using_password = startup_cfg.security.locked_enabled();
             app.manage(commands::AppState {
@@ -95,10 +149,13 @@ pub fn run() {
 
             let cfg = settings::load(app.state::<commands::AppState>().data_dir.as_path());
             if let Err(e) = register_shortcut(app.handle(), &cfg.shortcut) {
-                eprintln!("[project-finder] {e}");
+                eprintln!("[project-finder] 快捷键注册失败（不影响主功能）: {e}");
             }
 
-            build_tray(app)?;
+            // 托盘创建失败绝不能导致应用起不来
+            if let Err(e) = build_tray(app) {
+                eprintln!("[project-finder] 托盘图标创建失败（不影响主窗口）: {e}");
+            }
 
             // 启动后若 AI 开关已开启，自动把上次没跑完的 pending 补跑
             if cfg.ai.enabled && settings::ai_verified(&cfg.ai) && settings::ai_configured(&cfg.ai) {

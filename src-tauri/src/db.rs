@@ -143,7 +143,7 @@ impl Db {
         Ok(Db { conn })
     }
 
-    #[cfg(test)]
+    /// 内存数据库：用于测试，以及磁盘数据库不可用时的兜底（保证界面能启动）。
     pub fn open_in_memory() -> Result<Self, String> {
         let conn = Connection::open_in_memory().map_err(|e| e.to_string())?;
         conn.execute_batch(SCHEMA).map_err(|e| e.to_string())?;

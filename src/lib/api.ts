@@ -40,7 +40,15 @@ export const deleteProject = (id: number) => invoke<void>("delete_project", { id
 export const analyzeProject = (id: number) => invoke<void>("analyze_project", { id });
 export const analyzePending = (mode: "pending" | "all" = "pending") =>
   invoke<void>("analyze_pending", { mode });
-export const testAi = () => invoke<string>("test_ai");
+
+export interface TestAiResult {
+  ok: boolean;
+  message: string;
+  elapsedMs: number;
+  verifiedFingerprint: string;
+}
+
+export const testAi = () => invoke<TestAiResult>("test_ai");
 export const getStatus = () => invoke<AppStatus>("get_status");
 export const getDataInfo = () => invoke<DataInfo>("data_info");
 export const setAutostart = (enable: boolean) =>

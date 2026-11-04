@@ -177,6 +177,22 @@ pub fn save(dir: &Path, s: &Settings) -> Result<(), String> {
 }
 
 /// 保存前的清洗与兜底：裁剪路径、夹紧深度、补默认值。
+/// 保存前的清洗与兜底：裁剪路径、夹紧深度、补默认值。
+///
+/// 注意 `preserve_fingerprint`：保存设置时若本次提交的配置与「已验证过的配置」
+/// 完全一致，就沿用已有指纹，不能因为前端提交了空指纹就判定未验证。
+/// 否则会出现「测试通过 → 开启 → 保存 → 变回未启用」的循环。
+pub fn normalize_preserving_verification(incoming: &mut Settings, existing: &Settings) {
+    // 若调用方没带指纹，但配置内容与磁盘上已验证的配置一致，就继承指纹
+    if incoming.ai.verified_fingerprint.is_empty()
+        && ai_fingerprint(&incoming.ai) == ai_fingerprint(&existing.ai)
+        && !existing.ai.verified_fingerprint.is_empty()
+    {
+        incoming.ai.verified_fingerprint = existing.ai.verified_fingerprint.clone();
+    }
+    normalize(incoming);
+}
+
 pub fn normalize(s: &mut Settings) {
     s.roots.retain(|r| !r.path.trim().is_empty());
     for r in &mut s.roots {
@@ -426,5 +442,83 @@ mod tests {
     fn empty_fingerprint_is_not_verified() {
         let ai = AiConfig::default();
         assert!(!ai_verified(&ai));
+    }
+}
+
+#[cfg(test)]
+mod verification_persistence_tests {
+    use super::*;
+
+    fn verified_settings() -> Settings {
+        let mut s = Settings::default();
+        s.ai.api_key = "sk-test".into();
+        s.ai.base_url = "https://api.example.com/v1".into();
+        s.ai.model = "test-model".into();
+        s.ai.verified_fingerprint = ai_fingerprint(&s.ai);
+        s
+    }
+
+    #[test]
+    fn saving_without_fingerprint_keeps_verification_when_config_unchanged() {
+        // 复现用户 bug：前端提交空指纹（因为改过输入框），但配置内容没变
+        let existing = verified_settings();
+        let mut incoming = existing.clone();
+        incoming.ai.verified_fingerprint = String::new(); // 前端没带指纹
+        incoming.ai.enabled = true; // 用户刚勾上
+
+        normalize_preserving_verification(&mut incoming, &existing);
+
+        assert!(ai_verified(&incoming.ai), "配置没变时应继承已有指纹");
+        assert!(incoming.ai.enabled, "继承指纹后 enabled 不应被强制关闭");
+    }
+
+    #[test]
+    fn saving_with_changed_config_clears_verification() {
+        // 改了 key 就必须重新测试，不能沿用旧指纹
+        let existing = verified_settings();
+        let mut incoming = existing.clone();
+        incoming.ai.api_key = "sk-different".into();
+        incoming.ai.verified_fingerprint = String::new();
+        incoming.ai.enabled = true;
+
+        normalize_preserving_verification(&mut incoming, &existing);
+
+        assert!(!ai_verified(&incoming.ai), "配置变了不应继承指纹");
+        assert!(!incoming.ai.enabled, "未验证时必须关闭 enabled");
+    }
+
+    #[test]
+    fn explicit_fingerprint_is_respected() {
+        let existing = verified_settings();
+        let mut incoming = existing.clone();
+        incoming.ai.verified_fingerprint = "deadbeefdeadbeef".into();
+        normalize_preserving_verification(&mut incoming, &existing);
+        assert_eq!(incoming.ai.verified_fingerprint, "deadbeefdeadbeef");
+    }
+
+    #[test]
+    fn no_existing_verification_means_no_inheritance() {
+        let mut existing = Settings::default();
+        existing.ai.api_key = "sk-test".into();
+        // 没有指纹
+        let mut incoming = existing.clone();
+        incoming.ai.enabled = true;
+        normalize_preserving_verification(&mut incoming, &existing);
+        assert!(!incoming.ai.enabled);
+    }
+
+    #[test]
+    fn enabled_survives_repeated_saves() {
+        // 模拟用户连续保存三次（每次前端都丢指纹），enabled 必须保持
+        let existing = verified_settings();
+        let mut current = existing.clone();
+        for _ in 0..3 {
+            let mut incoming = current.clone();
+            incoming.ai.verified_fingerprint = String::new();
+            incoming.ai.enabled = true;
+            normalize_preserving_verification(&mut incoming, &current);
+            assert!(incoming.ai.enabled, "多次保存后 enabled 不应丢失");
+            current = incoming;
+        }
     }
 }
