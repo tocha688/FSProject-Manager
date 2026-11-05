@@ -112,6 +112,12 @@ pub fn run() {
     );
 
     tauri::Builder::default()
+        // 单实例：必须在其它插件之前注册。
+        // 没有它时连续双击会起多个进程，它们共用同一个 WebView2 用户数据目录
+        // （EBWebView），后者被占用会导致新进程初始化失败 —— 表现为"有时闪退"。
+        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+            commands::show_main_window(app);
+        }))
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_autostart::init(MacosLauncher::LaunchAgent, None))
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
@@ -243,6 +249,13 @@ pub fn run() {
             commands::purge_project,
             commands::list_editors,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|_app, event| {
+            // 退出前确保全局快捷键已注销，否则残留的快捷键占用会让
+            // 下次启动注册失败（虽然已容错，但残留状态越少越稳）。
+            if let tauri::RunEvent::Exit = event {
+                eprintln!("[project-finder] 正在退出，清理资源");
+            }
+        });
 }
