@@ -38,24 +38,47 @@ const PREFERRED = {
 const files = readdirSync(dir);
 const platforms = {};
 
+/**
+ * macOS 的 .app.tar.gz 文件名里不带架构（Tauri 固定输出 ProjectFinder.app.tar.gz），
+ * 无法从自身判断。改为看同批产物里的 .dmg 架构：
+ *   ProjectFinder_0.1.4_aarch64.dmg → 整批是 arm64
+ *   ProjectFinder_0.1.4_x64.dmg     → 整批是 x86_64
+ * 同一 release 里 macOS 只会有一种架构（CI 单 runner 构建）。
+ */
+function macosArch() {
+  const dmg = files.find((f) => f.endsWith(".dmg") && !f.endsWith(".sig"));
+  if (!dmg) return null;
+  return /aarch64|arm64/i.test(dmg) ? "aarch64" : "x86_64";
+}
+
 /** 在候选文件里挑出符合平台规则、且存在同名 .sig 的那个。 */
 function pick(target) {
   const wanted = PREFERRED[target] ?? [];
   const arch = target.includes("aarch64") ? "aarch64" : "x86_64";
   const osPart = target.split("-")[0];
 
+  // macOS 的 .app.tar.gz 自身无架构标识，用同批 dmg 推断；
+  // 与推断结果不符的目标直接跳过，避免把 arm64 包装成 x86_64 的更新。
+  if (osPart === "darwin") {
+    const actual = macosArch();
+    if (actual && actual !== arch) return null;
+  }
+
   const candidates = files.filter((f) => {
     if (!wanted.some((ext) => f.endsWith(ext))) return false;
     if (f.endsWith(".sig")) return false;
     const lower = f.toLowerCase();
-    // 粗略匹配架构，避免把 aarch64 包配给 x86_64
-    if (arch === "aarch64" && !/aarch64|arm64/.test(lower)) return false;
-    if (arch === "x86_64" && /aarch64|arm64/.test(lower)) return false;
     // 便携版不用于自动更新（它是 zip/tar.gz 的另一种分发形态）
     if (lower.includes("portable")) return false;
     if (osPart === "windows" && !lower.endsWith(".exe")) return false;
     if (osPart === "linux" && !lower.endsWith(".appimage")) return false;
-    if (osPart === "darwin" && !lower.endsWith(".app.tar.gz")) return false;
+    if (osPart === "darwin") {
+      // .app.tar.gz 文件名不含架构（已在上面用 dmg 校验过整批架构）
+      return lower.endsWith(".app.tar.gz");
+    }
+    // Windows / Linux 的产物名带架构，做一次交叉校验
+    if (arch === "aarch64" && !/aarch64|arm64/.test(lower)) return false;
+    if (arch === "x86_64" && /aarch64|arm64/.test(lower)) return false;
     return true;
   });
 
