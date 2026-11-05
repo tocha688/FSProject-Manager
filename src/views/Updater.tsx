@@ -7,15 +7,6 @@ import * as api from "../lib/api";
 const LATEST_JSON_URL =
   "https://github.com/tocha688/FSProject-Manager/releases/latest/download/latest.json";
 
-interface PortableManifest {
-  version: string;
-  notes?: string;
-  /** 安装版：Tauri updater 用 */
-  platforms: Record<string, { url: string; signature?: string }>;
-  /** 便携版：zip / tar.gz 直链 */
-  portable?: Record<string, { url: string }>;
-}
-
 export type UpdateStatus =
   | { kind: "idle" }
   | { kind: "checking" }
@@ -24,15 +15,6 @@ export type UpdateStatus =
   | { kind: "downloading"; progress: number }
   | { kind: "ready" }
   | { kind: "error"; message: string };
-
-function platformKey(): string {
-  const p = navigator.platform.toLowerCase();
-  const ua = navigator.userAgent.toLowerCase();
-  const arch = ua.includes("aarch64") || ua.includes("arm64") ? "aarch64" : "x86_64";
-  if (p.includes("win")) return `windows-${arch}`;
-  if (p.includes("mac")) return `darwin-${arch}`;
-  return `linux-${arch}`;
-}
 
 function isNewer(remote: string, current: string): boolean {
   const a = remote.split(".").map(Number);
@@ -48,11 +30,15 @@ function isNewer(remote: string, current: string): boolean {
 export function useUpdater() {
   const [status, setStatus] = useState<UpdateStatus>({ kind: "idle" });
   const [update, setUpdate] = useState<Update | null>(null);
-  const [portable, setPortable] = useState<api.PortableInfo | null>(null);
+  // undefined = 还在检测中；null = 检测失败（按非便携版处理）
+  const [portable, setPortable] = useState<api.PortableInfo | null | undefined>(undefined);
   const [portableUrl, setPortableUrl] = useState<string>("");
 
   useEffect(() => {
-    api.portableInfo().then(setPortable).catch(() => setPortable(null));
+    api
+      .portableInfo()
+      .then(setPortable)
+      .catch(() => setPortable(null));
   }, []);
 
   const checkForUpdate = useCallback(
@@ -61,21 +47,29 @@ export function useUpdater() {
       try {
         const current = await api.getAppVersion();
 
-        // 便携版：自己读 latest.json，找对应平台的便携包
-        if (portable?.isPortable) {
-          const res = await fetch(LATEST_JSON_URL, { cache: "no-store" });
-          if (!res.ok) throw new Error(`获取更新清单失败: HTTP ${res.status}`);
-          const manifest: PortableManifest = await res.json();
+        // 运行形态还没确定时必须先等它确定，否则便携版会被误当成安装版，
+        // 调用内置 updater 直接失败（表现为"检查更新失败"）。
+        let info = portable;
+        if (info === undefined) {
+          info = await api.portableInfo().catch(() => null);
+          setPortable(info);
+        }
+
+        // 便携版：读 latest.json，找对应平台的便携包
+        if (info?.isPortable) {
+          // 必须由后端发起请求：WebView 里 fetch 外部 HTTPS 会被跨域策略拦，
+          // 报 "Failed to fetch"，用户看到的就是"检查更新失败"。
+          const manifest = await api.fetchUpdateManifest(LATEST_JSON_URL);
           if (!isNewer(manifest.version, current)) {
             setStatus({ kind: "uptodate" });
             return;
           }
-          const key = platformKey();
-          const entry = manifest.portable?.[key];
-          if (!entry?.url) {
-            throw new Error(`更新清单里没有当前平台（${key}）的便携包`);
+          if (!manifest.portableUrl) {
+            throw new Error(
+              `更新清单里没有当前平台（${info.platformKey}）的便携包`,
+            );
           }
-          setPortableUrl(entry.url);
+          setPortableUrl(manifest.portableUrl);
           setStatus({
             kind: "available",
             version: manifest.version,

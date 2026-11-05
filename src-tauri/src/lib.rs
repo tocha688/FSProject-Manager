@@ -229,6 +229,7 @@ pub fn run() {
             commands::data_info,
             commands::app_version,
             commands::portable_info,
+            commands::fetch_update_manifest,
             commands::download_portable_update,
             commands::apply_portable_update,
             commands::set_autostart,

@@ -22,6 +22,29 @@ pub struct PortableInfo {
     pub exe_path: String,
     /// 便携版所在目录（更新时替换整个目录内的文件）
     pub install_dir: String,
+    /// 当前平台键，与 latest.json 里的键对应（如 windows-x86_64）。
+    /// 由后端判断，避免前端用 navigator.platform 猜错架构。
+    pub platform_key: String,
+    /// 当前应用版本（读 Cargo 包版本，与安装包一致）
+    pub version: String,
+}
+
+/// 生成 latest.json 使用的平台键。
+pub fn platform_key() -> String {
+    let os = if cfg!(windows) {
+        "windows"
+    } else if cfg!(target_os = "macos") {
+        "darwin"
+    } else {
+        "linux"
+    };
+    // 编译期架构判断，比运行时探测可靠
+    let arch = if cfg!(target_arch = "aarch64") {
+        "aarch64"
+    } else {
+        "x86_64"
+    };
+    format!("{os}-{arch}")
 }
 
 /// 判断当前是否以便携版运行。
@@ -33,6 +56,8 @@ pub fn detect(exe: &Path) -> PortableInfo {
         is_portable,
         exe_path: exe.to_string_lossy().to_string(),
         install_dir: dir.to_string_lossy().to_string(),
+        platform_key: platform_key(),
+        version: env!("CARGO_PKG_VERSION").to_string(),
     }
 }
 
@@ -185,5 +210,50 @@ mod tests {
         let s = unix_update_script("/opt/pf", "/tmp/staging", "ProjectFinder");
         assert!(s.contains("config.json|projects.db"));
         assert!(s.contains("chmod +x"));
+    }
+}
+
+#[cfg(test)]
+mod platform_tests {
+    use super::*;
+
+    #[test]
+    fn platform_key_matches_latest_json_format() {
+        let key = platform_key();
+        // 必须是 <os>-<arch> 形式，且 os/arch 在预期集合内
+        let parts: Vec<&str> = key.split('-').collect();
+        assert_eq!(parts.len(), 2, "平台键格式应为 os-arch: {key}");
+        assert!(
+            ["windows", "darwin", "linux"].contains(&parts[0]),
+            "未知 OS: {}",
+            parts[0]
+        );
+        assert!(
+            ["x86_64", "aarch64"].contains(&parts[1]),
+            "未知架构: {}",
+            parts[1]
+        );
+    }
+
+    #[test]
+    fn platform_key_is_compile_time_arch() {
+        // 与编译目标一致，不受运行时环境影响
+        let expected_arch = if cfg!(target_arch = "aarch64") {
+            "aarch64"
+        } else {
+            "x86_64"
+        };
+        assert!(platform_key().ends_with(expected_arch));
+    }
+
+    #[test]
+    fn detect_includes_platform_and_version() {
+        let tmp = tempfile::tempdir().unwrap();
+        let exe = tmp.path().join("App.exe");
+        std::fs::write(&exe, b"x").unwrap();
+        let info = detect(&exe);
+        assert!(!info.platform_key.is_empty());
+        assert_eq!(info.version, env!("CARGO_PKG_VERSION"));
+        assert!(!info.is_portable);
     }
 }

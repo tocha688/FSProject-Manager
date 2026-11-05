@@ -95,6 +95,10 @@ export interface PortableInfo {
   isPortable: boolean;
   exePath: string;
   installDir: string;
+  /** 与 latest.json 对应的平台键，如 windows-x86_64 */
+  platformKey: string;
+  /** 当前应用版本 */
+  version: string;
 }
 
 export interface PortableUpdateResult {
@@ -107,3 +111,14 @@ export const downloadPortableUpdate = (url: string, version: string) =>
   invoke<PortableUpdateResult>("download_portable_update", { url, version });
 export const applyPortableUpdate = (stagingDir: string) =>
   invoke<void>("apply_portable_update", { stagingDir });
+
+// ---------- 更新清单（必须走��端，WebView 里 fetch 外部 URL 会被拦）----------
+
+export interface UpdateManifest {
+  version: string;
+  notes: string;
+  portableUrl: string;
+}
+
+export const fetchUpdateManifest = (url: string) =>
+  invoke<UpdateManifest>("fetch_update_manifest", { url });

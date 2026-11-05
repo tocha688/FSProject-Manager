@@ -274,6 +274,67 @@ pub struct PortableUpdateResult {
     pub staging_dir: String,
 }
 
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateManifest {
+    pub version: String,
+    pub notes: String,
+    /// 当前平台的便携包下载地址（无则为空）
+    pub portable_url: String,
+}
+
+/// 拉取 latest.json 更新清单。
+///
+/// 必须由后端请求：WebView 里前端 fetch 外部 HTTPS 会被跨域/CSP 拦住
+/// （表现为 "Failed to fetch"，用户看到的就是"检查更新失败"）。
+#[tauri::command]
+pub async fn fetch_update_manifest(url: String) -> Result<UpdateManifest, String> {
+    tauri::async_runtime::spawn_blocking(move || -> Result<UpdateManifest, String> {
+        let client = reqwest::blocking::Client::builder()
+            .timeout(std::time::Duration::from_secs(30))
+            .user_agent(concat!("ProjectFinder/", env!("CARGO_PKG_VERSION")))
+            .build()
+            .map_err(|e| e.to_string())?;
+        let resp = client
+            .get(&url)
+            .send()
+            .map_err(|e| format!("请求更新清单失败: {e}"))?;
+        if !resp.status().is_success() {
+            return Err(format!("获取更新清单失败: HTTP {}", resp.status()));
+        }
+        let body: serde_json::Value = resp.json().map_err(|e| format!("清单解析失败: {e}"))?;
+
+        let version = body
+            .get("version")
+            .and_then(|v| v.as_str())
+            .ok_or("更新清单缺少 version 字段")?
+            .to_string();
+        let notes = body
+            .get("notes")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+
+        // 平台键按编译目标推断，与 latest.json 的键对齐
+        let key = portable_update::platform_key();
+        let portable_url = body
+            .get("portable")
+            .and_then(|p| p.get(&key))
+            .and_then(|e| e.get("url"))
+            .and_then(|u| u.as_str())
+            .unwrap_or("")
+            .to_string();
+
+        Ok(UpdateManifest {
+            version,
+            notes,
+            portable_url,
+        })
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 /// 下载并解压便携版更新包（不立即替换，等用户确认后重启）。
 #[tauri::command]
 pub async fn download_portable_update(url: String, version: String) -> Result<PortableUpdateResult, String> {
