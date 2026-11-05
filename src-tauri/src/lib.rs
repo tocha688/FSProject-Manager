@@ -103,6 +103,14 @@ fn show_fatal_error(message: &str) {
 }
 
 pub fn run() {
+    // 记录启动信息：首次启动（尤其便携版刚解压）若被杀软扫描或 WebView2 初始化慢，
+    // 用户反馈"闪退"时可据此判断是没起来还是起来后退出。
+    eprintln!(
+        "[project-finder] 启动 v{}，数据目录: {}",
+        env!("CARGO_PKG_VERSION"),
+        settings::data_dir().display()
+    );
+
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_autostart::init(MacosLauncher::LaunchAgent, None))
@@ -179,9 +187,23 @@ pub fn run() {
         .on_window_event(|window, event| {
             if let WindowEvent::CloseRequested { api, .. } = event {
                 if window.label() == "main" {
-                    // 点关闭 = 缩到托盘，不退出
-                    api.prevent_close();
-                    let _ = window.hide();
+                    // 点关闭 = 缩到托盘，不退出。
+                    // 但如果窗口从未成功显示过（首次启动 WebView 初始化失败），
+                    // 隐藏会导致"进程还在但看不到窗口"，用户感知为闪退。
+                    // 此时直接允许关闭，让用户能重新打开。
+                    let shown = window
+                        .is_visible()
+                        .ok()
+                        .filter(|v| *v)
+                        .is_some();
+                    if shown {
+                        api.prevent_close();
+                        let _ = window.hide();
+                    } else {
+                        eprintln!(
+                            "[project-finder] 主窗口未显示即收到关闭请求，允许退出以便重试"
+                        );
+                    }
                 }
             }
         })
