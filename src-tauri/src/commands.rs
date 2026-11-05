@@ -1,11 +1,14 @@
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::Mutex;
 use tauri::{AppHandle, Manager};
 
 use crate::analyzer::Provider;
-use crate::{actions, analyzer, auth, db, detect, editors, scan, search, security, settings, signals};
+use crate::{
+    actions, analyzer, auth, db, detect, editors, portable_update, scan, search, security,
+    settings, signals,
+};
 use tauri_plugin_autostart::ManagerExt as _;
 
 pub struct AppState {
@@ -252,6 +255,166 @@ pub fn save_settings(app: AppHandle, s: settings::Settings) -> Result<(), String
         al.disable().map_err(|e| e.to_string())?;
     }
     Ok(())
+}
+
+// ---------- 便携版更新 ----------
+
+/// 当前是否便携版运行，以及所在目录。
+#[tauri::command]
+pub fn portable_info() -> portable_update::PortableInfo {
+    let exe = std::env::current_exe().unwrap_or_default();
+    portable_update::detect(&exe)
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PortableUpdateResult {
+    pub version: String,
+    /// 已解压的新版本目录，前端提示用户后调用 apply_portable_update 完成替换
+    pub staging_dir: String,
+}
+
+/// 下载并解压便携版更新包（不立即替换，等用户确认后重启）。
+#[tauri::command]
+pub async fn download_portable_update(url: String, version: String) -> Result<PortableUpdateResult, String> {
+    tauri::async_runtime::spawn_blocking(move || -> Result<PortableUpdateResult, String> {
+        let exe = std::env::current_exe().map_err(|e| format!("取可执行文件路径失败: {e}"))?;
+        let info = portable_update::detect(&exe);
+        if !info.is_portable {
+            return Err("当前不是便携版运行，请使用内置更新".into());
+        }
+        let exe_name = exe
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .ok_or("无法获取可执行文件名")?;
+
+        // 下载 zip 到临时目录
+        let staging = std::env::temp_dir().join(format!("pf-update-{version}"));
+        let _ = std::fs::remove_dir_all(&staging);
+        std::fs::create_dir_all(&staging).map_err(|e| e.to_string())?;
+        let zip_path = staging.join("update.zip");
+
+        let client = reqwest::blocking::Client::builder()
+            .timeout(std::time::Duration::from_secs(300))
+            .build()
+            .map_err(|e| e.to_string())?;
+        let mut resp = client.get(&url).send().map_err(|e| format!("下载失败: {e}"))?;
+        if !resp.status().is_success() {
+            return Err(format!("下载失败: HTTP {}", resp.status()));
+        }
+        let mut file = std::fs::File::create(&zip_path).map_err(|e| e.to_string())?;
+        std::io::copy(&mut resp, &mut file).map_err(|e| format!("写入失败: {e}"))?;
+        drop(file);
+
+        // 解压
+        let extract_dir = staging.join("extracted");
+        std::fs::create_dir_all(&extract_dir).map_err(|e| e.to_string())?;
+        extract_zip(&zip_path, &extract_dir)?;
+
+        // 校验：解压结果里必须有主程序，否则拒绝继续（避免把用户目录搞坏）
+        if portable_update::find_executable_in_dir(&extract_dir, &exe_name).is_none() {
+            let _ = std::fs::remove_dir_all(&staging);
+            return Err("更新包内容异常：未找到主程序，已中止".into());
+        }
+
+        let _ = std::fs::remove_file(&zip_path);
+        Ok(PortableUpdateResult {
+            version,
+            staging_dir: extract_dir.to_string_lossy().to_string(),
+        })
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// 用已解压的新版本替换当前程序，然后退出让脚本接管。
+#[tauri::command]
+pub fn apply_portable_update(app: AppHandle, staging_dir: String) -> Result<(), String> {
+    let exe = std::env::current_exe().map_err(|e| format!("取路径失败: {e}"))?;
+    let info = portable_update::detect(&exe);
+    if !info.is_portable {
+        return Err("当前不是便携版".into());
+    }
+    let exe_name = exe
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .ok_or("无法获取可执行文件名")?;
+
+    let staging = PathBuf::from(&staging_dir);
+    if !staging.is_dir() {
+        return Err("更新目录不存在，请重新下载".into());
+    }
+
+    // 写脚本到临时目录，然后启动它，再退出本进程
+    let script_path = std::env::temp_dir().join(if cfg!(windows) {
+        "pf-apply-update.bat"
+    } else {
+        "pf-apply-update.sh"
+    });
+
+    let content = if cfg!(windows) {
+        portable_update::windows_update_script(&info.install_dir, &staging_dir, &exe_name)
+    } else {
+        portable_update::unix_update_script(&info.install_dir, &staging_dir, &exe_name)
+    };
+    std::fs::write(&script_path, content).map_err(|e| format!("写更新脚本失败: {e}"))?;
+
+    #[cfg(windows)]
+    {
+        std::process::Command::new("cmd")
+            .args(["/C", "start", "/min", "", &script_path.to_string_lossy()])
+            .spawn()
+            .map_err(|e| format!("启动更新脚本失败: {e}"))?;
+    }
+    #[cfg(not(windows))]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(&script_path)
+            .map_err(|e| e.to_string())?
+            .permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&script_path, perms).map_err(|e| e.to_string())?;
+        std::process::Command::new("sh")
+            .arg(&script_path)
+            .spawn()
+            .map_err(|e| format!("启动更新脚本失败: {e}"))?;
+    }
+
+    // 退出，让脚本替换文件
+    app.exit(0);
+    Ok(())
+}
+
+/// 极简 zip 解压：只支持 stored / deflate，够用于我们自己的更新包。
+fn extract_zip(zip_path: &Path, dest: &Path) -> Result<(), String> {
+    use std::io::Read;
+    let file = std::fs::File::open(zip_path).map_err(|e| e.to_string())?;
+    let mut archive = zip::ZipArchive::new(file).map_err(|e| format!("zip 解析失败: {e}"))?;
+    for i in 0..archive.len() {
+        let mut entry = archive.by_index(i).map_err(|e| e.to_string())?;
+        // 防路径穿越：只允许相对路径，且不能含 ..
+        let name = entry.name().to_string();
+        if name.contains("..") || name.starts_with('/') || name.starts_with('\\') {
+            continue;
+        }
+        let out_path = dest.join(&name);
+        if entry.is_dir() {
+            std::fs::create_dir_all(&out_path).map_err(|e| e.to_string())?;
+        } else {
+            if let Some(p) = out_path.parent() {
+                std::fs::create_dir_all(p).map_err(|e| e.to_string())?;
+            }
+            let mut out = std::fs::File::create(&out_path).map_err(|e| e.to_string())?;
+            std::io::copy(&mut entry, &mut out).map_err(|e| e.to_string())?;
+        }
+    }
+    Ok(())
+}
+
+/// 当前应用版本号（来自 tauri.conf 的 version）。
+#[tauri::command]
+pub fn app_version() -> String {
+    env!("CARGO_PKG_VERSION").to_string()
 }
 
 #[tauri::command]

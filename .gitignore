@@ -6,3 +6,7 @@ src-tauri/gen/
 *.db-wal
 *.db-shm
 .DS_Store
+
+# 更新签名私钥（绝不入库）
+*.key
+*.key.pub

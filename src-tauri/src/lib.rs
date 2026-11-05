@@ -5,6 +5,7 @@ mod commands;
 mod db;
 mod detect;
 mod editors;
+mod portable_update;
 mod scan;
 mod search;
 mod security;
@@ -106,6 +107,8 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_autostart::init(MacosLauncher::LaunchAgent, None))
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_process::init())
         .setup(|app| {
             let data_dir = settings::data_dir();
             if let Err(e) = std::fs::create_dir_all(&data_dir) {
@@ -202,6 +205,10 @@ pub fn run() {
             commands::test_ai,
             commands::get_status,
             commands::data_info,
+            commands::app_version,
+            commands::portable_info,
+            commands::download_portable_update,
+            commands::apply_portable_update,
             commands::set_autostart,
             commands::hide_quick,
             commands::get_lock_state,

@@ -85,3 +85,25 @@ export interface PurgeResult {
 /** 彻底删除项目文件夹 + 数据库记录。必须显式 confirm。 */
 export const purgeProject = (id: number, expectedPath: string) =>
   invoke<PurgeResult>("purge_project", { id, confirm: true, expectedPath });
+
+/** 当前应用版本号 */
+export const getAppVersion = () => invoke<string>("app_version");
+
+// ---------- 便携版更新 ----------
+
+export interface PortableInfo {
+  isPortable: boolean;
+  exePath: string;
+  installDir: string;
+}
+
+export interface PortableUpdateResult {
+  version: string;
+  stagingDir: string;
+}
+
+export const portableInfo = () => invoke<PortableInfo>("portable_info");
+export const downloadPortableUpdate = (url: string, version: string) =>
+  invoke<PortableUpdateResult>("download_portable_update", { url, version });
+export const applyPortableUpdate = (stagingDir: string) =>
+  invoke<void>("apply_portable_update", { stagingDir });

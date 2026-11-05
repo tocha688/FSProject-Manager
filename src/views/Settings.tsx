@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import * as api from "../lib/api";
 import type { DataInfo, SettingsView } from "../lib/types";
+import { UpdateSection } from "./Updater";
 
 export default function Settings({ onBack }: { onBack: () => void }) {
   const [s, setS] = useState<SettingsView | null>(null);
@@ -361,6 +362,7 @@ export default function Settings({ onBack }: { onBack: () => void }) {
           </div>
         </section>
 
+        <UpdateSection />
       </div>
 
       {toast && <div className="toast">{toast}</div>}

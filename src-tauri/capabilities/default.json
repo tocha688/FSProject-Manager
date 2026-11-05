@@ -1,5 +1,10 @@
 {
   "identifier": "default",
   "windows": ["main", "quick"],
-  "permissions": ["core:default", "dialog:default"]
+  "permissions": [
+    "core:default",
+    "dialog:default",
+    "updater:default",
+    "process:allow-restart"
+  ]
 }

@@ -95,6 +95,7 @@ if (platform === "win32") {
   }
   copyFileSync(exe, join(staging, `${FILE_PREFIX}.exe`));
   writeFileSync(join(staging, "使用说明.txt"), readme, "utf8");
+  writeFileSync(join(staging, "portable.marker"), String(version), "utf8");
 
   artifact = join(outDir, `${namePrefix}_portable.zip`);
   execSync(
@@ -108,6 +109,7 @@ if (platform === "win32") {
   );
   execSync(`cp -R "${appDir}" "${staging}/"`, { stdio: "inherit" });
   writeFileSync(join(staging, "README.txt"), readme, "utf8");
+  writeFileSync(join(staging, "portable.marker"), String(version), "utf8");
 
   artifact = join(outDir, `${namePrefix}_portable.tar.gz`);
   execSync(`tar -czf "${artifact}" -C "${staging}" .`, { stdio: "inherit" });
@@ -129,6 +131,7 @@ if (platform === "win32") {
     copyFileSync(bin, join(staging, `${FILE_PREFIX}`));
   }
   writeFileSync(join(staging, "README.txt"), readme, "utf8");
+  writeFileSync(join(staging, "portable.marker"), String(version), "utf8");
   // 启动脚本：自动加可执行权限
   writeFileSync(
     join(staging, "启动.sh"),
