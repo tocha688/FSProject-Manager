@@ -6,6 +6,7 @@ mod db;
 mod detect;
 mod editors;
 mod portable_update;
+mod project_match;
 mod scan;
 mod search;
 mod security;
@@ -247,6 +248,7 @@ pub fn run() {
             commands::unlock,
             commands::set_password,
             commands::purge_project,
+            commands::purge_missing_projects,
             commands::list_editors,
         ])
         .build(tauri::generate_context!())

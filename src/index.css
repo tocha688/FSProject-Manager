@@ -919,3 +919,14 @@ label.check {
 .err {
   color: var(--err);
 }
+
+.badge.st-missing {
+  color: var(--dim);
+  border-style: dashed;
+}
+
+/* 已丢失的卡片整体降低存在感，但仍可点开看备注 */
+.card.is-missing {
+  opacity: 0.72;
+  border-style: dashed;
+}

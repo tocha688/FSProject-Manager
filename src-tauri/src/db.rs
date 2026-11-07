@@ -369,7 +369,77 @@ impl Db {
         Ok(n)
     }
 
+    /// 标记路径已不存在的项目为 missing，**不删除记录**。
+    ///
+    /// 旧实现直接 DELETE，会连带丢掉 AI 描述、标签和用户备注。
+    /// 项目可能只是临时移走（移动硬盘没插、目录改名）——保留下来更安全，
+    /// 用户可在界面上手动清理。
+    /// 返回本次新标记为 missing 的数量。
+    pub fn mark_missing(&self) -> Result<usize, String> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT id, path, status FROM projects")
+            .map_err(|e| e.to_string())?;
+        let rows: Vec<(i64, String, String)> = stmt
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .map_err(|e| e.to_string())?
+            .collect::<Result<_, _>>()
+            .map_err(|e| e.to_string())?;
+        let mut marked = 0;
+        for (id, path, status) in rows {
+            if status == "missing" {
+                continue; // 已标记过
+            }
+            if !Path::new(&path).exists() {
+                self.conn
+                    .execute(
+                        "UPDATE projects SET status='missing', updated_at=?1 WHERE id=?2",
+                        params![now(), id],
+                    )
+                    .map_err(|e| e.to_string())?;
+                marked += 1;
+            }
+        }
+        Ok(marked)
+    }
+
+    /// 列出所有被标记为 missing 的记录（供移动识别使用）。
+    pub fn missing_projects(&self) -> Result<Vec<ProjectRow>, String> {
+        let sql = format!(
+            "SELECT {COLS} FROM projects WHERE status='missing' ORDER BY id"
+        );
+        let mut stmt = self.conn.prepare(&sql).map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map([], row_to_project)
+            .map_err(|e| e.to_string())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())?;
+        Ok(rows)
+    }
+
+    /// 把一条记录的路径改为新路径（移动识别成功后调用）。
+    /// 状态恢复为 pending，因为项目内容可能也变了，值得重新分析。
+    pub fn relocate(&self, id: i64, new_path: &str, new_name: &str) -> Result<(), String> {
+        self.conn
+            .execute(
+                "UPDATE projects SET path=?1, name=?2, status='pending', updated_at=?3 WHERE id=?4",
+                params![new_path, new_name, now(), id],
+            )
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    /// 清理所有 missing 记录（用户手动触发）。
+    pub fn purge_missing(&self) -> Result<usize, String> {
+        let n = self
+            .conn
+            .execute("DELETE FROM projects WHERE status='missing'", [])
+            .map_err(|e| e.to_string())?;
+        Ok(n)
+    }
+
     /// 清理磁盘上已不存在的项目，返回删除数量。
+    /// 保留此方法用于显式清理（区别于自动扫描时的软标记）。
     pub fn prune_missing(&self) -> Result<usize, String> {
         let mut stmt = self
             .conn
@@ -713,5 +783,112 @@ mod filter_tests {
         // 并且新列可用
         db.set_project_type(rows[0].id, "库/框架").unwrap();
         assert_eq!(db.get(rows[0].id).unwrap().unwrap().project_type, "库/框架");
+    }
+}
+
+#[cfg(test)]
+mod move_and_missing_tests {
+    use super::*;
+
+    fn sample(path: &str, name: &str) -> NewProject {
+        NewProject {
+            path: path.into(),
+            name: name.into(),
+            language: "Rust".into(),
+            status: "pending".into(),
+            deps: vec![],
+            commits: vec![],
+            readme: None,
+            git_remote: None,
+            structure: vec![],
+            last_commit_at: None,
+        }
+    }
+
+    #[test]
+    fn mark_missing_keeps_record_and_user_data() {
+        let db = Db::open_in_memory().unwrap();
+        db.upsert(&sample(r"C:\gone", "gone")).unwrap();
+        let id = db.get_id_by_path(r"C:\gone").unwrap().unwrap();
+        // 写入用户数据
+        db.set_analysis_typed(id, "AI 描述", &["标签".into()], "Web 应用", "ai")
+            .unwrap();
+        db.update_notes(id, Some("我的备注")).unwrap();
+
+        let marked = db.mark_missing().unwrap();
+        assert_eq!(marked, 1);
+
+        let row = db.get(id).unwrap().unwrap();
+        assert_eq!(row.status, "missing", "应标记为 missing 而不是删除");
+        assert_eq!(row.description.as_deref(), Some("AI 描述"), "AI 描述必须保留");
+        assert_eq!(row.tags, vec!["标签"]);
+        assert_eq!(row.notes.as_deref(), Some("我的备注"), "用户备注必须保留");
+    }
+
+    #[test]
+    fn mark_missing_is_idempotent() {
+        let db = Db::open_in_memory().unwrap();
+        db.upsert(&sample(r"C:\gone", "gone")).unwrap();
+        assert_eq!(db.mark_missing().unwrap(), 1);
+        // 第二次不应重复计数（已经是 missing）
+        assert_eq!(db.mark_missing().unwrap(), 0);
+    }
+
+    #[test]
+    fn existing_paths_are_not_marked() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("alive");
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = Db::open_in_memory().unwrap();
+        db.upsert(&sample(dir.to_string_lossy().as_ref(), "alive"))
+            .unwrap();
+        assert_eq!(db.mark_missing().unwrap(), 0);
+        assert_eq!(db.list().unwrap()[0].status, "pending");
+    }
+
+    #[test]
+    fn missing_projects_lists_only_missing() {
+        let db = Db::open_in_memory().unwrap();
+        db.upsert(&sample(r"C:\gone", "gone")).unwrap();
+        db.upsert(&sample(r"C:\also-gone", "also")).unwrap();
+        db.mark_missing().unwrap();
+        let m = db.missing_projects().unwrap();
+        assert_eq!(m.len(), 2);
+    }
+
+    #[test]
+    fn relocate_updates_path_and_resets_status() {
+        let db = Db::open_in_memory().unwrap();
+        db.upsert(&sample(r"C:\old\proj", "proj")).unwrap();
+        let id = db.get_id_by_path(r"C:\old\proj").unwrap().unwrap();
+        db.set_analysis_typed(id, "重要描述", &["tag".into()], "Web 应用", "ai")
+            .unwrap();
+        db.mark_missing().unwrap();
+
+        db.relocate(id, r"D:\new\proj", "proj").unwrap();
+        let row = db.get(id).unwrap().unwrap();
+        assert_eq!(row.path, r"D:\new\proj");
+        assert_eq!(row.status, "pending", "移动后应重新排队分析");
+        // 关键：元数据仍在
+        assert_eq!(row.description.as_deref(), Some("重要描述"));
+        assert_eq!(row.tags, vec!["tag"]);
+    }
+
+    #[test]
+    fn purge_missing_removes_only_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("alive");
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = Db::open_in_memory().unwrap();
+        db.upsert(&sample(dir.to_string_lossy().as_ref(), "alive"))
+            .unwrap();
+        db.upsert(&sample(r"C:\gone", "gone")).unwrap();
+        db.mark_missing().unwrap();
+
+        let n = db.purge_missing().unwrap();
+        assert_eq!(n, 1);
+        let left = db.list().unwrap();
+        assert_eq!(left.len(), 1);
+        assert_eq!(left[0].name, "alive");
     }
 }

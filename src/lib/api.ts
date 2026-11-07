@@ -122,3 +122,6 @@ export interface UpdateManifest {
 
 export const fetchUpdateManifest = (url: string) =>
   invoke<UpdateManifest>("fetch_update_manifest", { url });
+
+/** 清理所有标记为「已丢失」的项目记录。 */
+export const purgeMissing = () => invoke<number>("purge_missing_projects");

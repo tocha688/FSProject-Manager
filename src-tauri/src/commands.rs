@@ -6,6 +6,7 @@ use tauri::{AppHandle, Manager};
 
 use crate::analyzer::Provider;
 use crate::{
+    project_match,
     actions, analyzer, auth, db, detect, editors, portable_update, scan, search, security,
     settings, signals,
 };
@@ -33,7 +34,10 @@ fn now_secs() -> i64 {
 #[serde(rename_all = "camelCase")]
 pub struct ScanResult {
     pub found: usize,
-    pub pruned: usize,
+    /// 路径消失、被标记为"已丢失"的项目数（记录保留，不删数据）
+    pub marked_missing: usize,
+    /// 识别为"移动"并迁移了元数据的项目数
+    pub moved: usize,
     pub total: usize,
 }
 
@@ -576,19 +580,71 @@ fn do_scan(st: &AppState) -> Result<ScanResult, String> {
     let found_projects = collect_projects(&cfg);
     let found = found_projects.len();
 
-    // 第二步：逐个短锁写入，每写一条就释放，绝不跨项目持锁
+    // 第二步：先标记路径已消失的记录（不删除，保留 AI 描述与用户备注），
+    // 并取出这些"丢失"记录用于移动识别。
+    let missing_before = {
+        let db = st.db.lock().map_err(|_| "数据库被占用")?;
+        db.mark_missing()?;
+        db.missing_projects()?
+    };
+
+    // 第三步：移动识别。若某条 missing 记录与本次扫描到的某个新路径
+    // 指纹一致，就把元数据迁过去，而不是当成新项目重复分析。
+    let mut moved = 0usize;
+    let mut relocated_paths: std::collections::HashSet<String> = Default::default();
+    if !missing_before.is_empty() {
+        for m in &missing_before {
+            let old_fp = project_match::Fingerprint {
+                name: m.name.clone(),
+                language: m.language.clone(),
+                git_remote: m.git_remote.clone(),
+                deps: m.deps.clone(),
+            };
+            // 在本次扫描结果里找一个还没被认领、且指纹匹配的项目
+            let hit = found_projects.iter().find(|p| {
+                if relocated_paths.contains(&p.path) {
+                    return false;
+                }
+                let new_fp = project_match::Fingerprint {
+                    name: p.name.clone(),
+                    language: p.language.clone(),
+                    git_remote: p.git_remote.clone(),
+                    deps: p.deps.clone(),
+                };
+                project_match::is_same_project(&old_fp, &new_fp)
+            });
+            if let Some(target) = hit {
+                let db = st.db.lock().map_err(|_| "数据库被占用")?;
+                db.relocate(m.id, &target.path, &target.name)?;
+                relocated_paths.insert(target.path.clone());
+                moved += 1;
+            }
+        }
+    }
+
+    // 第四步：逐个短锁写入（跳过已迁移的路径，避免又插一条新记录）
     for p in &found_projects {
+        if relocated_paths.contains(&p.path) {
+            continue;
+        }
         let db = st.db.lock().map_err(|_| "数据库被占用")?;
         db.upsert(p)?;
     }
 
-    let (pruned, total) = {
+    let (marked_missing, total) = {
         let db = st.db.lock().map_err(|_| "数据库被占用")?;
-        let pruned = db.prune_missing()?;
+        // 再标记一次：本轮新出现的缺失（例如扫描过程中被删）
+        db.mark_missing()?;
         let total = db.list()?.len();
-        (pruned, total)
+        (missing_before.len(), total)
     };
-    Ok(ScanResult { found, pruned, total })
+
+    Ok(ScanResult {
+        found,
+        marked_missing,
+        moved,
+        total,
+    })
 }
 
 /// 后台逐个分析 pending 项目；AI 未配置时静默跳过（项目靠 FTS 兜底可用）。
@@ -964,6 +1020,12 @@ pub struct PurgeResult {
     pub removed_from_db: bool,
     /// 文件夹是否真的被删掉了（不存在也算 true）
     pub removed_folder: bool,
+}
+
+/// 清理所有标记为「已丢失」的项目记录（只删数据库记录，磁盘上本就不存在）。
+#[tauri::command]
+pub async fn purge_missing_projects(app: AppHandle) -> Result<usize, String> {
+    with_db(app, |db| db.purge_missing()).await
 }
 
 /// 彻底删除：项目文件夹（快速删除）+ 数据库记录。

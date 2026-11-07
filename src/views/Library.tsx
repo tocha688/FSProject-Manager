@@ -210,7 +210,12 @@ export default function Library() {
       notify("扫描中…");
       const r = await api.scanNow();
       void api.analyzePending("pending");
-      notify(`扫描完成：发现 ${r.found} 个，清理失效 ${r.pruned} 个，库中共 ${r.total} 个`);
+      notify(
+        `扫描完成：发现 ${r.found} 个` +
+          (r.moved > 0 ? `，识别到 ${r.moved} 个项目被移动并已恢复` : "") +
+          (r.markedMissing > 0 ? `，${r.markedMissing} 个已丢失（记录已保留）` : "") +
+          `，库中共 ${r.total} 个`,
+      );
       refresh(queryRef.current);
     } catch (e) {
       notify(String(e));
@@ -381,6 +386,7 @@ export default function Library() {
           <option value="pending">待分析</option>
           <option value="failed">分析失败</option>
           <option value="candidate">待确认</option>
+          <option value="missing">已丢失</option>
         </select>
         {filtering && (
           <>
@@ -424,7 +430,7 @@ export default function Library() {
           {visible.map((p) => (
             <div
               key={p.id}
-              className={`card ${selected?.id === p.id ? "sel" : ""}`}
+              className={`card ${selected?.id === p.id ? "sel" : ""} ${p.status === "missing" ? "is-missing" : ""}`}
               onClick={() => setSelected(p)}
               onContextMenu={(e) => {
                 e.preventDefault();

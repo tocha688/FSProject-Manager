@@ -61,7 +61,10 @@ export interface AppStatus {
 
 export interface ScanResult {
   found: number;
-  pruned: number;
+  /** 路径消失、被标记为「已丢失」的项目数（记录保留） */
+  markedMissing: number;
+  /** 识别为移动并迁移了元数据的项目数 */
+  moved: number;
   total: number;
 }
 

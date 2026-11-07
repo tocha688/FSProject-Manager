@@ -72,6 +72,16 @@ export default function Settings({ onBack }: { onBack: () => void }) {
     setPwdBusy(false);
   };
 
+  const purgeMissing = async () => {
+    if (!window.confirm("将删除所有标记为「已丢失」的项目记录（含 AI 描述与备注），确定吗？")) return;
+    try {
+      const n = await api.purgeMissing();
+      notify(n > 0 ? `已清理 ${n} 条丢失记录` : "没有需要清理的记录");
+    } catch (e) {
+      notify(String(e));
+    }
+  };
+
   const lockNow = async () => {
     try {
       await api.lockNow();
@@ -176,6 +186,14 @@ export default function Settings({ onBack }: { onBack: () => void }) {
             </div>
           ))}
           <button onClick={addRoot}>＋ 添加目录</button>
+
+          <div className="row wrap" style={{ marginTop: 8 }}>
+            <span className="dim small" style={{ flex: 1 }}>
+              文件夹被移走或删除的项目会标记为「已丢失」并保留其说明与备注；
+              项目被移动后再次扫描会自动识别并恢复。
+            </span>
+            <button onClick={purgeMissing}>清理已丢失项目</button>
+          </div>
         </section>
 
         <section>

@@ -23,6 +23,7 @@ const STATUS_LABELS: Record<string, string> = {
   analyzing: "分析中",
   failed: "分析失败",
   candidate: "待确认",
+  missing: "已丢失",
 };
 
 export function statusLabel(s: string): string {

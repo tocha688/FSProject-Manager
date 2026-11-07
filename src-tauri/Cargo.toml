@@ -1,6 +1,6 @@
 [package]
 name = "project-mg-app"
-version = "0.1.8"
+version = "0.1.9"
 description = "项目快搜：本地项目索引与 AI 语义搜索"
 edition = "2021"
 

@@ -69,3 +69,9 @@ describe("statusLabel", () => {
     expect(statusLabel("whatever")).toBe("whatever");
   });
 });
+
+describe("missing 状态", () => {
+  it("已丢失显示中文", () => {
+    expect(statusLabel("missing")).toBe("已丢失");
+  });
+});
