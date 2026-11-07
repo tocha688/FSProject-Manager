@@ -120,8 +120,30 @@ export interface UpdateManifest {
   portableUrl: string;
 }
 
-export const fetchUpdateManifest = (url: string) =>
-  invoke<UpdateManifest>("fetch_update_manifest", { url });
+export const fetchUpdateManifest = (url: string, mirrorPrefix?: string) =>
+  invoke<UpdateManifest>("fetch_update_manifest", { url, mirrorPrefix: mirrorPrefix ?? null });
 
 /** 清理所有标记为「已丢失」的项目记录。 */
 export const purgeMissing = () => invoke<number>("purge_missing_projects");
+
+// ---------- 镜像源 ----------
+
+export interface MirrorSpeed {
+  id: string;
+  label: string;
+  ok: boolean;
+  elapsedMs: number;
+  error: string;
+}
+
+export interface MirrorInfo {
+  id: string;
+  label: string;
+  prefix: string;
+}
+
+export const listMirrors = () => invoke<MirrorInfo[]>("list_mirrors");
+export const speedTestMirrors = (probeUrl: string) =>
+  invoke<MirrorSpeed[]>("speed_test_mirrors", { probeUrl });
+export const mirrorUrl = (prefix: string, url: string) =>
+  invoke<string>("mirror_url", { prefix, url });

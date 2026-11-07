@@ -6,9 +6,8 @@ use tauri::{AppHandle, Manager};
 
 use crate::analyzer::Provider;
 use crate::{
-    project_match,
-    actions, analyzer, auth, db, detect, editors, portable_update, scan, search, security,
-    settings, signals,
+    actions, analyzer, auth, db, detect, editors, mirrors, portable_update, project_match, scan,
+    search, security, settings, signals,
 };
 use tauri_plugin_autostart::ManagerExt as _;
 
@@ -287,12 +286,134 @@ pub struct UpdateManifest {
     pub portable_url: String,
 }
 
+/// 并发测速所有镜像，返回各自耗时。
+///
+/// 测试目标用 GitHub 的一个固定小文件（latest.json），只取响应头，
+/// 不下载正文，尽量减少流量。
+#[tauri::command]
+pub async fn speed_test_mirrors(probe_url: String) -> Result<Vec<mirrors::MirrorSpeed>, String> {
+    tauri::async_runtime::spawn_blocking(move || -> Result<Vec<mirrors::MirrorSpeed>, String> {
+        let handles: Vec<_> = mirrors::MIRRORS
+            .iter()
+            .map(|m| {
+                let prefix = m.prefix;
+                let id = m.id.to_string();
+                let label = m.label.to_string();
+                let url = mirrors::apply_mirror(prefix, &probe_url);
+                std::thread::spawn(move || {
+                    let started = std::time::Instant::now();
+                    let client = match reqwest::blocking::Client::builder()
+                        .timeout(std::time::Duration::from_secs(5))
+                        .user_agent(concat!("ProjectFinder/", env!("CARGO_PKG_VERSION")))
+                        .build()
+                    {
+                        Ok(c) => c,
+                        Err(e) => {
+                            return mirrors::MirrorSpeed {
+                                id,
+                                label,
+                                ok: false,
+                                elapsed_ms: 0,
+                                error: e.to_string(),
+                            }
+                        }
+                    };
+                    // 必须真正 GET 并校验内容：
+                    // 某些镜像对 HEAD 返回 200，但 GET 回来的是 HTML 错误页，
+                    // 只用 HEAD 测速会把这类"假可用"源选出来，导致后续解析失败。
+                    match client.get(&url).send() {
+                        Ok(mut resp) if resp.status().is_success() => {
+                            let mut buf = [0u8; 512];
+                            use std::io::Read;
+                            let n = resp.read(&mut buf).unwrap_or(0);
+                            let head = String::from_utf8_lossy(&buf[..n]);
+                            if head.trim_start().starts_with('{') {
+                                mirrors::MirrorSpeed {
+                                    id,
+                                    label,
+                                    ok: true,
+                                    elapsed_ms: started.elapsed().as_millis() as u64,
+                                    error: String::new(),
+                                }
+                            } else {
+                                mirrors::MirrorSpeed {
+                                    id,
+                                    label,
+                                    ok: false,
+                                    elapsed_ms: 0,
+                                    error: "返回内容不是 JSON（镜像可能返回了错误页）".into(),
+                                }
+                            }
+                        }
+                        Ok(resp) => mirrors::MirrorSpeed {
+                            id,
+                            label,
+                            ok: false,
+                            elapsed_ms: 0,
+                            error: format!("HTTP {}", resp.status()),
+                        },
+                        Err(e) => mirrors::MirrorSpeed {
+                            id,
+                            label,
+                            ok: false,
+                            elapsed_ms: 0,
+                            error: e.to_string(),
+                        },
+                    }
+                })
+            })
+            .collect();
+
+        let mut out = Vec::new();
+        for h in handles {
+            if let Ok(r) = h.join() {
+                out.push(r);
+            }
+        }
+        // 稳定排序：可用的按耗时升序在前，失败的在后
+        out.sort_by(|a, b| {
+            b.ok.cmp(&a.ok)
+                .then(a.elapsed_ms.cmp(&b.elapsed_ms))
+                .then(a.id.cmp(&b.id))
+        });
+        Ok(out)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// 列出所有内置镜像及其前缀（供前端展示与选源）。
+#[tauri::command]
+pub fn list_mirrors() -> Vec<serde_json::Value> {
+    mirrors::MIRRORS
+        .iter()
+        .map(|m| {
+            serde_json::json!({
+                "id": m.id,
+                "label": m.label,
+                "prefix": m.prefix,
+            })
+        })
+        .collect()
+}
+
+/// 把官方 URL 套到指定镜像前缀上。prefix 为空即直连。
+#[tauri::command]
+pub fn mirror_url(prefix: String, url: String) -> String {
+    mirrors::apply_mirror(&prefix, &url)
+}
+
 /// 拉取 latest.json 更新清单。
 ///
 /// 必须由后端请求：WebView 里前端 fetch 外部 HTTPS 会被跨域/CSP 拦住
 /// （表现为 "Failed to fetch"，用户看到的就是"检查更新失败"）。
 #[tauri::command]
-pub async fn fetch_update_manifest(url: String) -> Result<UpdateManifest, String> {
+pub async fn fetch_update_manifest(
+    url: String,
+    mirror_prefix: Option<String>,
+) -> Result<UpdateManifest, String> {
+    let prefix = mirror_prefix.unwrap_or_default();
+    let url = mirrors::apply_mirror(&prefix, &url);
     tauri::async_runtime::spawn_blocking(move || -> Result<UpdateManifest, String> {
         let client = reqwest::blocking::Client::builder()
             .timeout(std::time::Duration::from_secs(30))
@@ -328,6 +449,13 @@ pub async fn fetch_update_manifest(url: String) -> Result<UpdateManifest, String
             .and_then(|u| u.as_str())
             .unwrap_or("")
             .to_string();
+
+        // 便携包下载地址同样套上镜像前缀（相对原始 GitHub URL）
+        let portable_url = if portable_url.is_empty() {
+            portable_url
+        } else {
+            mirrors::apply_mirror(&prefix, &portable_url)
+        };
 
         Ok(UpdateManifest {
             version,
@@ -445,7 +573,10 @@ pub fn apply_portable_update(app: AppHandle, staging_dir: String) -> Result<(), 
             .map_err(|e| format!("启动更新脚本失败: {e}"))?;
     }
 
-    // 退出，让脚本替换文件
+    // 退出，让脚本接管。
+    // 给脚本一点时间先跑起来（它内部还会轮询等本进程退出），
+    // 否则可能出现脚本还没启动、进程就没了的情况。
+    std::thread::sleep(std::time::Duration::from_millis(300));
     app.exit(0);
     Ok(())
 }

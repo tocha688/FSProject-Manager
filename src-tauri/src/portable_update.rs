@@ -93,29 +93,65 @@ pub fn windows_update_script(
     staging_dir: &str,
     exe_name: &str,
 ) -> String {
-    // robocopy 的退出码 0-7 都算成功，>=8 才是错误
+    // 脚本内容必须是纯 ASCII：中文 Windows 的 cmd 按 GBK 解析 .bat，
+    // UTF-8 中文会变乱码并截断 `set "TARGET=..."` 等关键行。
+    //
+    // 关键点：
+    // 1) 必须等本进程和它的 WebView2 子进程完全退出，否则 robocopy 复制 exe 会
+    //    "文件被占用"失败 —— 这是之前"更新后重启有问题"的主因。
+    // 2) 用 tasklist 轮询等待，最多 30 秒，而不是固定 ping 延时。
+    // 3) robocopy 失败时重试一次（杀软可能临时锁文件）。
     format!(
         r#"@echo off
-chcp 65001 >nul
-setlocal
+setlocal enabledelayedexpansion
 set "TARGET={target}"
 set "SOURCE={source}"
 set "EXE={exe}"
+set "LOG=%TEMP%\pf-update.log"
 
-rem 等待旧进程退出
-ping -n 4 127.0.0.1 >nul
+echo [1/4] waiting for processes to exit... > "%LOG%"
 
-rem 镜像文件，但排除用户数据，避免覆盖配置与数据库
-robocopy "%SOURCE%" "%TARGET%" /E /IS /IT /XF config.json projects.db projects.db-wal projects.db-shm /NFL /NDL /NJH /NJS /NC /NS >nul
-if errorlevel 8 (
-  echo 更新失败：文件复制出错
-  pause
+set /a WAIT=0
+:WAITLOOP
+rem use findstr (built into Windows) instead of find, to avoid Git find.exe on PATH
+tasklist /FI "IMAGENAME eq {exe}" /NH 2>nul | findstr /I /C:"{exe}" >nul
+if not errorlevel 1 (
+  set /a WAIT+=1
+  if !WAIT! GEQ 30 (
+    echo [WARN] process still running after 30s, forcing continue >> "%LOG%"
+    goto COPYFILES
+  )
+  ping -n 2 127.0.0.1 >nul
+  goto WAITLOOP
+)
+
+:COPYFILES
+echo [2/4] copying new files (attempt 1)... >> "%LOG%"
+robocopy "%SOURCE%" "%TARGET%" /E /IS /IT /XF config.json projects.db projects.db-wal projects.db-shm /NFL /NDL /NJH /NJS /NC /NS >> "%LOG%" 2>&1
+set RC=%ERRORLEVEL%
+if %RC% GEQ 8 (
+  echo [RETRY] robocopy failed with %RC%, retrying... >> "%LOG%"
+  ping -n 4 127.0.0.1 >nul
+  robocopy "%SOURCE%" "%TARGET%" /E /IS /IT /XF config.json projects.db projects.db-wal projects.db-shm /NFL /NDL /NJH /NJS /NC /NS >> "%LOG%" 2>&1
+  set RC=%ERRORLEVEL%
+)
+if %RC% GEQ 8 (
+  echo [FAILED] robocopy exit code %RC% >> "%LOG%"
+  powershell -NoProfile -Command "Add-Type -A System.Windows.Forms; [System.Windows.Forms.MessageBox]::Show('ProjectFinder update failed (copy error %RC%). Log: %LOG%')" 2>nul
   exit /b 1
 )
 
+echo [3/4] verifying new executable... >> "%LOG%"
+if not exist "%TARGET%\%EXE%" (
+  echo [FAILED] target exe missing >> "%LOG%"
+  powershell -NoProfile -Command "Add-Type -A System.Windows.Forms; [System.Windows.Forms.MessageBox]::Show('ProjectFinder update failed: executable missing after copy.')" 2>nul
+  exit /b 1
+)
+
+echo [4/4] starting new version... >> "%LOG%"
 start "" "%TARGET%\%EXE%"
 
-rem 自删（延迟一下确保句柄释放）
+echo [OK] update applied >> "%LOG%"
 (goto) 2>nul & del "%~f0"
 "#,
         target = install_dir,
@@ -255,5 +291,74 @@ mod platform_tests {
         assert!(!info.platform_key.is_empty());
         assert_eq!(info.version, env!("CARGO_PKG_VERSION"));
         assert!(!info.is_portable);
+    }
+}
+
+#[cfg(test)]
+mod script_safety_tests {
+    use super::*;
+
+    fn win_script() -> String {
+        windows_update_script(r"C:\Apps\PF", r"C:\Temp\staging", "ProjectFinder.exe")
+    }
+
+    #[test]
+    fn windows_script_is_pure_ascii() {
+        // 回归：中文 Windows 的 cmd 按 GBK 解析 .bat，
+        // 任何非 ASCII 字符都会让脚本行被截断、整条更新失败。
+        let s = win_script();
+        for (i, ch) in s.chars().enumerate() {
+            assert!(
+                ch.is_ascii(),
+                "脚本第 {i} 个字符非 ASCII: {ch:?} —— 会导致 cmd 解析错乱"
+            );
+        }
+    }
+
+    #[test]
+    fn windows_script_excludes_user_data() {
+        let s = win_script();
+        assert!(s.contains("/XF config.json projects.db"), "必须排除用户数据文件");
+        assert!(s.contains("projects.db-wal"));
+        assert!(s.contains("projects.db-shm"));
+    }
+
+    #[test]
+    fn windows_script_waits_for_process() {
+        let s = win_script();
+        assert!(s.contains("WAITLOOP"), "必须等待进程退出，否则复制 exe 会失败");
+        assert!(s.contains("tasklist"));
+        assert!(s.contains("findstr"), "用 findstr 而非 find，避免 Git 的 find.exe 冲突");
+        assert!(!s.contains("| find /I"), "不应使用 find 命令");
+    }
+
+    #[test]
+    fn windows_script_retries_copy() {
+        let s = win_script();
+        assert!(s.contains("[RETRY]"), "robocopy 失败应重试一次");
+        assert!(s.contains("GEQ 8"), "robocopy 退出码 >=8 才算失败");
+    }
+
+    #[test]
+    fn windows_script_verifies_before_start() {
+        let s = win_script();
+        assert!(s.contains("if not exist"), "启动前应校验目标 exe 存在");
+        assert!(s.contains(r#"start "" "%TARGET%\%EXE%""#));
+    }
+
+    #[test]
+    fn windows_script_contains_paths() {
+        let s = win_script();
+        assert!(s.contains(r#"set "TARGET=C:\Apps\PF""#));
+        assert!(s.contains(r#"set "SOURCE=C:\Temp\staging""#));
+        assert!(s.contains(r#"set "EXE=ProjectFinder.exe""#));
+    }
+
+    #[test]
+    fn unix_script_is_safe() {
+        let s = unix_update_script("/opt/pf", "/tmp/staging", "ProjectFinder");
+        assert!(s.starts_with("#!/bin/sh"));
+        assert!(s.contains("config.json|projects.db"), "必须跳过用户数据");
+        assert!(s.contains("chmod +x"));
     }
 }

@@ -27,6 +27,24 @@ function isNewer(remote: string, current: string): boolean {
   return false;
 }
 
+/**
+ * 测速并选出最快的镜像前缀。
+ * 直连在 800ms 内就不折腾镜像（多一跳代理反而慢，也少一个信任点）。
+ */
+async function pickMirrorPrefix(): Promise<string> {
+  try {
+    const results = await api.speedTestMirrors(LATEST_JSON_URL);
+    const direct = results.find((r) => r.id === "direct");
+    if (direct?.ok && direct.elapsedMs <= 800) return "";
+    const fastest = results.filter((r) => r.ok).sort((a, b) => a.elapsedMs - b.elapsedMs)[0];
+    if (!fastest || fastest.id === "direct") return "";
+    const all = await api.listMirrors();
+    return all.find((m) => m.id === fastest.id)?.prefix ?? "";
+  } catch {
+    return ""; // 测速失败就直连
+  }
+}
+
 export function useUpdater() {
   const [status, setStatus] = useState<UpdateStatus>({ kind: "idle" });
   const [update, setUpdate] = useState<Update | null>(null);
@@ -59,7 +77,8 @@ export function useUpdater() {
         if (info?.isPortable) {
           // 必须由后端发起请求：WebView 里 fetch 外部 HTTPS 会被跨域策略拦，
           // 报 "Failed to fetch"，用户看到的就是"检查更新失败"。
-          const manifest = await api.fetchUpdateManifest(LATEST_JSON_URL);
+          const prefix = await pickMirrorPrefix();
+          const manifest = await api.fetchUpdateManifest(LATEST_JSON_URL, prefix);
           if (!isNewer(manifest.version, current)) {
             setStatus({ kind: "uptodate" });
             return;

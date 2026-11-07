@@ -5,6 +5,7 @@ mod commands;
 mod db;
 mod detect;
 mod editors;
+mod mirrors;
 mod portable_update;
 mod project_match;
 mod scan;
@@ -237,6 +238,9 @@ pub fn run() {
             commands::app_version,
             commands::portable_info,
             commands::fetch_update_manifest,
+            commands::speed_test_mirrors,
+            commands::list_mirrors,
+            commands::mirror_url,
             commands::download_portable_update,
             commands::apply_portable_update,
             commands::set_autostart,
